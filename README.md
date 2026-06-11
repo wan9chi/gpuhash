@@ -30,7 +30,12 @@ On an Apple M5 Pro with a prepared 512 MiB batch, Criterion reports:
 See [BENCHMARKS.md](BENCHMARKS.md) for the full command and throughput table.
 The Apple Silicon benchmark job runs in
 [GitHub Actions](https://github.com/wan9chi/gpuhash/actions/workflows/ci.yml?query=branch%3Amain);
-open the latest `Benchmark on Apple Silicon` run for the Criterion report artifact.
+the latest verified run is
+[CI #27371941256](https://github.com/wan9chi/gpuhash/actions/runs/27371941256),
+with the
+[Benchmark on Apple Silicon job](https://github.com/wan9chi/gpuhash/actions/runs/27371941256/job/80886383482)
+and
+[criterion-report artifact](https://github.com/wan9chi/gpuhash/actions/runs/27371941256/artifacts/7574779190).
 
 ## Run
 
