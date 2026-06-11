@@ -1,0 +1,507 @@
+#![forbid(unsafe_op_in_unsafe_fn)]
+
+#[cfg(target_os = "macos")]
+mod metal_backend;
+
+use std::{error::Error, fmt};
+
+/// Result type used by this crate.
+pub type Result<T> = std::result::Result<T, GpuHashError>;
+
+/// Errors returned by the GPU backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpuHashError {
+    /// The current platform does not expose a usable Metal device.
+    MetalUnavailable,
+    /// A Metal API or shader compilation call failed.
+    Metal(String),
+    /// The requested input is too large for this API's Metal buffer layout.
+    InputTooLarge,
+}
+
+impl fmt::Display for GpuHashError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MetalUnavailable => write!(f, "no usable Apple Metal device is available"),
+            Self::Metal(message) => write!(f, "Metal error: {message}"),
+            Self::InputTooLarge => write!(f, "input is too large for the GPU batch layout"),
+        }
+    }
+}
+
+impl Error for GpuHashError {}
+
+/// A reusable batch of messages stored in Apple Silicon shared memory.
+///
+/// Preparing a batch does the CPU-side packing once. Hashing the prepared batch
+/// dispatches a Metal compute kernel over the already shared buffers.
+pub struct PreparedBatch {
+    #[cfg(target_os = "macos")]
+    inner: metal_backend::PreparedBatch,
+    count: usize,
+    total_bytes: usize,
+}
+
+impl PreparedBatch {
+    /// Number of messages in the batch.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Returns true when the batch contains no messages.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Sum of all unpadded message lengths.
+    #[must_use]
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+}
+
+/// Apple Silicon GPU hash engine.
+pub struct GpuHash {
+    #[cfg(target_os = "macos")]
+    inner: metal_backend::GpuHash,
+}
+
+impl GpuHash {
+    /// Creates a Metal-backed hash engine.
+    pub fn new() -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Self {
+                inner: metal_backend::GpuHash::new()?,
+            })
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Returns whether a GPU hash engine can be created on this machine.
+    #[must_use]
+    pub fn is_available() -> bool {
+        Self::new().is_ok()
+    }
+
+    /// Packs messages into GPU-visible shared memory for repeated hashing.
+    pub fn prepare_batch<M: AsRef<[u8]>>(&self, messages: &[M]) -> Result<PreparedBatch> {
+        #[cfg(target_os = "macos")]
+        {
+            let inner = self.inner.prepare_batch(messages)?;
+            Ok(PreparedBatch {
+                count: inner.count(),
+                total_bytes: inner.total_bytes(),
+                inner,
+            })
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = messages;
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Computes `twox_hash::XxHash32::oneshot(seed, message)` for every message.
+    pub fn xxhash32_prepared(&self, seed: u32, batch: &PreparedBatch) -> Result<Vec<u32>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.xxhash32(seed, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (seed, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Computes `twox_hash::XxHash64::oneshot(seed, message)` for every message.
+    pub fn xxhash64_prepared(&self, seed: u64, batch: &PreparedBatch) -> Result<Vec<u64>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.xxhash64(seed, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (seed, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Computes `twox_hash::XxHash3_64::oneshot(message)` for every message.
+    pub fn xxhash3_64_prepared(&self, batch: &PreparedBatch) -> Result<Vec<u64>> {
+        self.xxhash3_64_with_seed_prepared(0, batch)
+    }
+
+    /// Computes `twox_hash::XxHash3_64::oneshot_with_seed(seed, message)` for every message.
+    pub fn xxhash3_64_with_seed_prepared(
+        &self,
+        seed: u64,
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u64>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.xxhash3_64(seed, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (seed, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Computes `twox_hash::XxHash3_128::oneshot(message)` for every message.
+    pub fn xxhash3_128_prepared(&self, batch: &PreparedBatch) -> Result<Vec<u128>> {
+        self.xxhash3_128_with_seed_prepared(0, batch)
+    }
+
+    /// Computes `twox_hash::XxHash3_128::oneshot_with_seed(seed, message)` for every message.
+    pub fn xxhash3_128_with_seed_prepared(
+        &self,
+        seed: u64,
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u128>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.xxhash3_128(seed, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (seed, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Computes RustCrypto-compatible SHA-256 digests for every message.
+    pub fn sha256_prepared(&self, batch: &PreparedBatch) -> Result<Vec<[u8; 32]>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.sha256(&batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = batch;
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with xxHash32.
+    pub fn xxhash32<M: AsRef<[u8]>>(&self, seed: u32, messages: &[M]) -> Result<Vec<u32>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash32_prepared(seed, &batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with xxHash64.
+    pub fn xxhash64<M: AsRef<[u8]>>(&self, seed: u64, messages: &[M]) -> Result<Vec<u64>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash64_prepared(seed, &batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with XXH3-64.
+    pub fn xxhash3_64<M: AsRef<[u8]>>(&self, messages: &[M]) -> Result<Vec<u64>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_64_prepared(&batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with seeded XXH3-64.
+    pub fn xxhash3_64_with_seed<M: AsRef<[u8]>>(
+        &self,
+        seed: u64,
+        messages: &[M],
+    ) -> Result<Vec<u64>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_64_with_seed_prepared(seed, &batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with XXH3-128.
+    pub fn xxhash3_128<M: AsRef<[u8]>>(&self, messages: &[M]) -> Result<Vec<u128>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_128_prepared(&batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with seeded XXH3-128.
+    pub fn xxhash3_128_with_seed<M: AsRef<[u8]>>(
+        &self,
+        seed: u64,
+        messages: &[M],
+    ) -> Result<Vec<u128>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_128_with_seed_prepared(seed, &batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with SHA-256.
+    pub fn sha256<M: AsRef<[u8]>>(&self, messages: &[M]) -> Result<Vec<[u8; 32]>> {
+        let batch = self.prepare_batch(messages)?;
+        self.sha256_prepared(&batch)
+    }
+}
+
+/// Convenience wrapper around [`GpuHash::xxhash32`].
+pub fn xxhash32_batch<M: AsRef<[u8]>>(seed: u32, messages: &[M]) -> Result<Vec<u32>> {
+    GpuHash::new()?.xxhash32(seed, messages)
+}
+
+/// Convenience wrapper around [`GpuHash::xxhash64`].
+pub fn xxhash64_batch<M: AsRef<[u8]>>(seed: u64, messages: &[M]) -> Result<Vec<u64>> {
+    GpuHash::new()?.xxhash64(seed, messages)
+}
+
+/// Convenience wrapper around [`GpuHash::xxhash3_64`].
+pub fn xxhash3_64_batch<M: AsRef<[u8]>>(messages: &[M]) -> Result<Vec<u64>> {
+    GpuHash::new()?.xxhash3_64(messages)
+}
+
+/// Convenience wrapper around [`GpuHash::xxhash3_64_with_seed`].
+pub fn xxhash3_64_with_seed_batch<M: AsRef<[u8]>>(seed: u64, messages: &[M]) -> Result<Vec<u64>> {
+    GpuHash::new()?.xxhash3_64_with_seed(seed, messages)
+}
+
+/// Convenience wrapper around [`GpuHash::xxhash3_128`].
+pub fn xxhash3_128_batch<M: AsRef<[u8]>>(messages: &[M]) -> Result<Vec<u128>> {
+    GpuHash::new()?.xxhash3_128(messages)
+}
+
+/// Convenience wrapper around [`GpuHash::xxhash3_128_with_seed`].
+pub fn xxhash3_128_with_seed_batch<M: AsRef<[u8]>>(seed: u64, messages: &[M]) -> Result<Vec<u128>> {
+    GpuHash::new()?.xxhash3_128_with_seed(seed, messages)
+}
+
+/// Convenience wrapper around [`GpuHash::sha256`].
+pub fn sha256_batch<M: AsRef<[u8]>>(messages: &[M]) -> Result<Vec<[u8; 32]>> {
+    GpuHash::new()?.sha256(messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use sha2::{Digest as _, Sha256};
+    use twox_hash::{XxHash3_64, XxHash3_128, XxHash32, XxHash64};
+
+    fn sample_messages() -> Vec<Vec<u8>> {
+        let mut messages = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"abc".to_vec(),
+            b"message digest".to_vec(),
+            b"abcdefghijklmnopqrstuvwxyz".to_vec(),
+            b"some bytes".to_vec(),
+        ];
+
+        for len in [
+            1usize, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 55, 56, 57, 63, 64, 65, 95, 96, 97, 127,
+            128, 129, 239, 240, 241, 1024, 1025, 4099,
+        ] {
+            messages.push(
+                (0..len)
+                    .map(|i| (i.wrapping_mul(37) & 0xff) as u8)
+                    .collect(),
+            );
+        }
+
+        messages
+    }
+
+    fn fuzz_messages() -> impl Strategy<Value = Vec<Vec<u8>>> {
+        prop::collection::vec(prop::collection::vec(any::<u8>(), 0..=4096), 1..=24)
+    }
+
+    #[test]
+    fn xxhash32_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        for seed in [0, 1, 1234, u32::MAX, 0xdead_cafe] {
+            let got = gpu.xxhash32(seed, &messages)?;
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash32::oneshot(seed, message))
+                .collect();
+            assert_eq!(got, expected, "seed {seed:#x}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn xxhash3_64_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        let got = gpu.xxhash3_64(&messages)?;
+        let expected: Vec<_> = messages
+            .iter()
+            .map(|message| XxHash3_64::oneshot(message))
+            .collect();
+        assert_eq!(got, expected);
+
+        for seed in [1, 1234, u64::MAX, 0xdead_cafe_beef_f00d] {
+            let got = gpu.xxhash3_64_with_seed(seed, &messages)?;
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot_with_seed(seed, message))
+                .collect();
+            assert_eq!(got, expected, "seed {seed:#x}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn xxhash3_128_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        let got = gpu.xxhash3_128(&messages)?;
+        let expected: Vec<_> = messages
+            .iter()
+            .map(|message| XxHash3_128::oneshot(message))
+            .collect();
+        assert_eq!(got, expected);
+
+        for seed in [1, 1234, u64::MAX, 0xdead_cafe_beef_f00d] {
+            let got = gpu.xxhash3_128_with_seed(seed, &messages)?;
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_128::oneshot_with_seed(seed, message))
+                .collect();
+            assert_eq!(got, expected, "seed {seed:#x}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn xxhash64_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        for seed in [0, 1, 1234, u64::MAX, 0xdead_cafe_beef_f00d] {
+            let got = gpu.xxhash64(seed, &messages)?;
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash64::oneshot(seed, message))
+                .collect();
+            assert_eq!(got, expected, "seed {seed:#x}");
+        }
+
+        assert_eq!(
+            XxHash64::oneshot(1234, b"some bytes"),
+            0xeab5_5659_a496_d78b
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sha256_matches_rustcrypto() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+        let got = gpu.sha256(&messages)?;
+        let expected: Vec<[u8; 32]> = messages
+            .iter()
+            .map(|message| Sha256::digest(message).into())
+            .collect();
+
+        assert_eq!(got, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_batches_can_be_reused() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+        let batch = gpu.prepare_batch(&messages)?;
+
+        let first32 = gpu.xxhash32_prepared(42, &batch)?;
+        let second32 = gpu.xxhash32_prepared(42, &batch)?;
+        assert_eq!(first32, second32);
+
+        let first = gpu.xxhash64_prepared(42, &batch)?;
+        let second = gpu.xxhash64_prepared(42, &batch)?;
+        assert_eq!(first, second);
+
+        let first3_64 = gpu.xxhash3_64_prepared(&batch)?;
+        let second3_64 = gpu.xxhash3_64_prepared(&batch)?;
+        assert_eq!(first3_64, second3_64);
+
+        let first3_128 = gpu.xxhash3_128_prepared(&batch)?;
+        let second3_128 = gpu.xxhash3_128_prepared(&batch)?;
+        assert_eq!(first3_128, second3_128);
+
+        let sha_first = gpu.sha256_prepared(&batch)?;
+        let sha_second = gpu.sha256_prepared(&batch)?;
+        assert_eq!(sha_first, sha_second);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn fuzz_xxhash32_matches_twox_hash(seed in any::<u32>(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash32(seed, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash32::oneshot(seed, message))
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_xxhash64_matches_twox_hash(seed in any::<u64>(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash64(seed, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash64::oneshot(seed, message))
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_xxhash3_64_matches_twox_hash(seed in any::<u64>(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash3_64_with_seed(seed, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot_with_seed(seed, message))
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_xxhash3_128_matches_twox_hash(seed in any::<u64>(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash3_128_with_seed(seed, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_128::oneshot_with_seed(seed, message))
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_sha256_matches_rustcrypto(messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.sha256(&messages).unwrap();
+            let expected: Vec<[u8; 32]> = messages
+                .iter()
+                .map(|message| Sha256::digest(message).into())
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+    }
+}

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test on Apple Silicon
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner
+        run: |
+          uname -a
+          sysctl -n machdep.cpu.brand_string || true
+          system_profiler SPDisplaysDataType || true
+          rustc --version
+          cargo --version
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Check benches and examples
+        run: cargo check --locked --benches --examples
+
+      - name: Test and fuzz
+        run: cargo test --locked
+
+  bench:
+    name: Benchmark on Apple Silicon
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show runner
+        run: |
+          uname -a
+          sysctl -n machdep.cpu.brand_string || true
+          system_profiler SPDisplaysDataType || true
+          rustc --version
+          cargo --version
+
+      - name: Quick benchmark
+        run: |
+          cargo run --release --example quick_bench | tee quick-bench.txt
+          {
+            echo "## Quick benchmark"
+            echo
+            echo '```text'
+            cat quick-bench.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Criterion benchmark
+        run: cargo bench --locked --bench hash_batch | tee criterion-bench.txt
+
+      - name: Summarize Criterion output
+        if: always()
+        run: |
+          {
+            echo "## Criterion benchmark"
+            echo
+            echo '```text'
+            cat criterion-bench.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Criterion report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-report
+          path: target/criterion
+          if-no-files-found: warn
