@@ -51,5 +51,5 @@ cargo bench --bench hash_batch
 GPU acceleration is a batch API. Single tiny messages are still better served by
 the CPU reference crates because Metal command submission has fixed overhead.
 The fastest path is `PreparedBatch` reuse; buffered GPU-backed hasher helpers are
-also available for `std::hash::Hasher`-style compatibility when ergonomics matter
-more than peak throughput.
+also available for `std::hash::Hasher`- and `BuildHasher`-style compatibility
+when ergonomics matter more than peak throughput.

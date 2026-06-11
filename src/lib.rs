@@ -532,6 +532,38 @@ impl hash::Hasher for GpuXxHash32 {
     }
 }
 
+/// Constructs [`GpuXxHash32`] instances with a fixed seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuXxHash32State(u32);
+
+impl GpuXxHash32State {
+    /// Constructs a builder with an initial seed.
+    #[must_use]
+    pub const fn with_seed(seed: u32) -> Self {
+        Self(seed)
+    }
+
+    /// The seed used for hashers created by this builder.
+    #[must_use]
+    pub const fn seed(&self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for GpuXxHash32State {
+    fn default() -> Self {
+        Self::with_seed(0)
+    }
+}
+
+impl hash::BuildHasher for GpuXxHash32State {
+    type Hasher = GpuXxHash32;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        GpuXxHash32::with_seed(self.0).expect("failed to create GPU xxHash32 hasher")
+    }
+}
+
 /// Buffered GPU-backed xxHash64 hasher.
 pub struct GpuXxHash64 {
     engine: GpuHash,
@@ -592,6 +624,38 @@ impl hash::Hasher for GpuXxHash64 {
     fn finish(&self) -> u64 {
         self.finish_64()
             .expect("failed to finish GPU xxHash64 hasher")
+    }
+}
+
+/// Constructs [`GpuXxHash64`] instances with a fixed seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuXxHash64State(u64);
+
+impl GpuXxHash64State {
+    /// Constructs a builder with an initial seed.
+    #[must_use]
+    pub const fn with_seed(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    /// The seed used for hashers created by this builder.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for GpuXxHash64State {
+    fn default() -> Self {
+        Self::with_seed(0)
+    }
+}
+
+impl hash::BuildHasher for GpuXxHash64State {
+    type Hasher = GpuXxHash64;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        GpuXxHash64::with_seed(self.0).expect("failed to create GPU xxHash64 hasher")
     }
 }
 
@@ -690,6 +754,38 @@ impl hash::Hasher for GpuXxHash3_64 {
     fn finish(&self) -> u64 {
         self.finish_64()
             .expect("failed to finish GPU XXH3-64 hasher")
+    }
+}
+
+/// Constructs [`GpuXxHash3_64`] instances with a fixed seed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GpuXxHash3_64State(u64);
+
+impl GpuXxHash3_64State {
+    /// Constructs a builder with an initial seed.
+    #[must_use]
+    pub const fn with_seed(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    /// The seed used for hashers created by this builder.
+    #[must_use]
+    pub const fn seed(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for GpuXxHash3_64State {
+    fn default() -> Self {
+        Self::with_seed(0)
+    }
+}
+
+impl hash::BuildHasher for GpuXxHash3_64State {
+    type Hasher = GpuXxHash3_64;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        GpuXxHash3_64::with_seed(self.0).expect("failed to create GPU XXH3-64 hasher")
     }
 }
 
@@ -855,7 +951,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use sha2::{Digest as _, Sha256};
-    use std::hash::Hasher as StdHasher;
+    use std::hash::{BuildHasher as _, Hasher as StdHasher};
     use twox_hash::{XxHash3_64, XxHash3_128, XxHash32, XxHash64};
 
     fn sample_messages() -> Vec<Vec<u8>> {
@@ -1211,6 +1307,38 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn build_hashers_match_streaming_references() {
+        let message = b"builder-based streaming hash";
+
+        let xx32_builder = GpuXxHash32State::with_seed(0xdead_cafe);
+        assert_eq!(xx32_builder.seed(), 0xdead_cafe);
+        let mut got32 = xx32_builder.build_hasher();
+        let mut expected32 = XxHash32::with_seed(0xdead_cafe);
+        got32.write(message);
+        StdHasher::write(&mut expected32, message);
+        assert_eq!(got32.finish_32().unwrap(), expected32.finish_32());
+        assert_eq!(StdHasher::finish(&got32), StdHasher::finish(&expected32));
+
+        let xx64_builder = GpuXxHash64State::with_seed(0xdead_cafe_beef_f00d);
+        assert_eq!(xx64_builder.seed(), 0xdead_cafe_beef_f00d);
+        let mut got64 = xx64_builder.build_hasher();
+        let mut expected64 = XxHash64::with_seed(0xdead_cafe_beef_f00d);
+        got64.write(message);
+        StdHasher::write(&mut expected64, message);
+        assert_eq!(got64.finish_64().unwrap(), StdHasher::finish(&expected64));
+        assert_eq!(StdHasher::finish(&got64), StdHasher::finish(&expected64));
+
+        let xxh3_builder = GpuXxHash3_64State::with_seed(0x1234_5678_9abc_def0);
+        assert_eq!(xxh3_builder.seed(), 0x1234_5678_9abc_def0);
+        let mut got3 = xxh3_builder.build_hasher();
+        let mut expected3 = XxHash3_64::with_seed(0x1234_5678_9abc_def0);
+        got3.write(message);
+        StdHasher::write(&mut expected3, message);
+        assert_eq!(got3.finish_64().unwrap(), StdHasher::finish(&expected3));
+        assert_eq!(StdHasher::finish(&got3), StdHasher::finish(&expected3));
     }
 
     #[test]
