@@ -21,7 +21,8 @@ Silicon that means CPU and GPU access the same unified-memory allocation; the
 buffers across many hash launches. Result vectors are wrapped as no-copy shared
 Metal buffers, so kernels write directly into the Rust output allocation.
 Small kernel configuration structs are bound inline with Metal `setBytes`,
-avoiding per-dispatch config-buffer allocation.
+avoiding per-dispatch config-buffer allocation. XXH3 secrets up to 4 KiB use
+the same inline path; larger custom secrets fall back to shared Metal buffers.
 
 ## Performance
 

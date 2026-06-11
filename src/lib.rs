@@ -1055,7 +1055,7 @@ mod tests {
         let gpu = GpuHash::new()?;
         let messages = sample_messages();
 
-        for secret_len in [136, 192, 257] {
+        for secret_len in [136, 192, 257, 4097] {
             let secret = custom_secret(secret_len);
             let got = gpu.xxhash3_64_with_secret(&secret, &messages)?;
             let expected: Vec<_> = messages
@@ -1082,7 +1082,7 @@ mod tests {
         let messages = sample_messages();
 
         for seed in [0, 1, 1234, u64::MAX, 0xdead_cafe_beef_f00d] {
-            for secret_len in [136, 192, 257] {
+            for secret_len in [136, 192, 257, 4097] {
                 let secret = custom_secret(secret_len);
                 let got = gpu.xxhash3_64_with_seed_and_secret(seed, &secret, &messages)?;
                 let expected: Vec<_> = messages
@@ -1127,7 +1127,7 @@ mod tests {
         let gpu = GpuHash::new()?;
         let messages = sample_messages();
 
-        for secret_len in [136, 192, 257] {
+        for secret_len in [136, 192, 257, 4097] {
             let secret = custom_secret(secret_len);
             let got = gpu.xxhash3_128_with_secret(&secret, &messages)?;
             let expected: Vec<_> = messages
@@ -1154,7 +1154,7 @@ mod tests {
         let messages = sample_messages();
 
         for seed in [0, 1, 1234, u64::MAX, 0xdead_cafe_beef_f00d] {
-            for secret_len in [136, 192, 257] {
+            for secret_len in [136, 192, 257, 4097] {
                 let secret = custom_secret(secret_len);
                 let got = gpu.xxhash3_128_with_seed_and_secret(seed, &secret, &messages)?;
                 let expected: Vec<_> = messages

@@ -34,6 +34,8 @@ Benchmark batch:
   the command buffer completes
 - small kernel configuration structs are bound inline with Metal `setBytes`
   instead of allocating per-dispatch config buffers
+- XXH3 secrets up to 4 KiB are also bound inline, with larger custom secrets
+  falling back to shared Metal buffers
 - XXH3 large-message accumulation uses aligned 64-bit loads for regular
   message and secret stripes
 - SHA-256 compresses full 64-byte data blocks directly and only uses padded

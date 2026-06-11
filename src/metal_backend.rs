@@ -8,6 +8,7 @@ use std::{mem, ptr};
 
 const SHADERS: &str = include_str!("shaders.metal");
 const MESSAGE_ALIGN: usize = 8;
+const METAL_SET_BYTES_LIMIT: usize = 4096;
 const XXH3_SECRET_MINIMUM_LENGTH: usize = 136;
 const XXH3_SECRET_DERIVED_FOR_LARGE: u32 = 0;
 const XXH3_SECRET_CUSTOM_FOR_ALL: u32 = 1;
@@ -412,11 +413,7 @@ impl GpuHash {
         }
 
         let out_buffer = self.output_buffer(&mut output, batch.count);
-        let secret_buffer = self.device.new_buffer_with_data(
-            secret.as_ptr().cast(),
-            secret.len() as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let secret_buffer = self.secret_buffer_if_needed(secret);
 
         if let Some(uniform) = batch.uniform {
             let config = UniformXxHash3Config {
@@ -432,7 +429,7 @@ impl GpuHash {
                 encoder.set_buffer(0, Some(&batch.input), 0);
                 encoder.set_buffer(1, Some(&out_buffer), 0);
                 Self::set_config_bytes(encoder, 2, &config);
-                encoder.set_buffer(3, Some(&secret_buffer), 0);
+                Self::set_secret_bytes(encoder, 3, secret, secret_buffer.as_ref());
             })?;
         } else {
             let config = XxHash3Config {
@@ -447,7 +444,7 @@ impl GpuHash {
                 encoder.set_buffer(1, Some(&batch.descs), 0);
                 encoder.set_buffer(2, Some(&out_buffer), 0);
                 Self::set_config_bytes(encoder, 3, &config);
-                encoder.set_buffer(4, Some(&secret_buffer), 0);
+                Self::set_secret_bytes(encoder, 4, secret, secret_buffer.as_ref());
             })?;
         }
 
@@ -497,11 +494,7 @@ impl GpuHash {
         }
 
         let out_buffer = self.output_buffer(&mut output, batch.count);
-        let secret_buffer = self.device.new_buffer_with_data(
-            secret.as_ptr().cast(),
-            secret.len() as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let secret_buffer = self.secret_buffer_if_needed(secret);
 
         if let Some(uniform) = batch.uniform {
             let config = UniformXxHash3Config {
@@ -517,7 +510,7 @@ impl GpuHash {
                 encoder.set_buffer(0, Some(&batch.input), 0);
                 encoder.set_buffer(1, Some(&out_buffer), 0);
                 Self::set_config_bytes(encoder, 2, &config);
-                encoder.set_buffer(3, Some(&secret_buffer), 0);
+                Self::set_secret_bytes(encoder, 3, secret, secret_buffer.as_ref());
             })?;
         } else {
             let config = XxHash3Config {
@@ -532,7 +525,7 @@ impl GpuHash {
                 encoder.set_buffer(1, Some(&batch.descs), 0);
                 encoder.set_buffer(2, Some(&out_buffer), 0);
                 Self::set_config_bytes(encoder, 3, &config);
-                encoder.set_buffer(4, Some(&secret_buffer), 0);
+                Self::set_secret_bytes(encoder, 4, secret, secret_buffer.as_ref());
             })?;
         }
 
@@ -593,6 +586,16 @@ impl GpuHash {
         )
     }
 
+    fn secret_buffer_if_needed(&self, secret: &[u8]) -> Option<Buffer> {
+        (secret.len() > METAL_SET_BYTES_LIMIT).then(|| {
+            self.device.new_buffer_with_data(
+                secret.as_ptr().cast(),
+                secret.len() as u64,
+                MTLResourceOptions::StorageModeShared,
+            )
+        })
+    }
+
     fn set_config_bytes<T>(
         encoder: &metal::ComputeCommandEncoderRef,
         index: NSUInteger,
@@ -603,6 +606,19 @@ impl GpuHash {
             mem::size_of::<T>() as NSUInteger,
             (value as *const T).cast(),
         );
+    }
+
+    fn set_secret_bytes(
+        encoder: &metal::ComputeCommandEncoderRef,
+        index: NSUInteger,
+        secret: &[u8],
+        buffer: Option<&Buffer>,
+    ) {
+        if let Some(buffer) = buffer {
+            encoder.set_buffer(index, Some(buffer), 0);
+        } else {
+            encoder.set_bytes(index, secret.len() as NSUInteger, secret.as_ptr().cast());
+        }
     }
 
     fn dispatch(
