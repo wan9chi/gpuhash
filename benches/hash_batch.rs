@@ -7,6 +7,7 @@ use twox_hash::{XxHash3_64, XxHash3_128, XxHash32, XxHash64};
 const COUNT: usize = 131_072;
 const LEN: usize = 4096;
 const SEED: u64 = 0x1234_5678_9abc_def0;
+const CUSTOM_SECRET_LEN: usize = 257;
 
 fn messages() -> Vec<Vec<u8>> {
     (0..COUNT)
@@ -19,6 +20,17 @@ fn messages() -> Vec<Vec<u8>> {
                         .rotate_left((byte_idx & 7) as u32)
                 })
                 .collect()
+        })
+        .collect()
+}
+
+fn custom_secret() -> Vec<u8> {
+    (0..CUSTOM_SECRET_LEN)
+        .map(|idx| {
+            (idx as u8)
+                .wrapping_mul(17)
+                .wrapping_add(91)
+                .rotate_left((idx & 7) as u32)
         })
         .collect()
 }
@@ -51,6 +63,20 @@ fn xxhash3_128_cpu(input: &[Vec<u8>]) -> Vec<u128> {
         .collect()
 }
 
+fn xxhash3_64_secret_cpu(input: &[Vec<u8>], secret: &[u8]) -> Vec<u64> {
+    input
+        .iter()
+        .map(|message| XxHash3_64::oneshot_with_secret(secret, message).unwrap())
+        .collect()
+}
+
+fn xxhash3_128_secret_cpu(input: &[Vec<u8>], secret: &[u8]) -> Vec<u128> {
+    input
+        .iter()
+        .map(|message| XxHash3_128::oneshot_with_secret(secret, message).unwrap())
+        .collect()
+}
+
 fn sha256_cpu(input: &[Vec<u8>]) -> Vec<[u8; 32]> {
     input
         .iter()
@@ -60,6 +86,7 @@ fn sha256_cpu(input: &[Vec<u8>]) -> Vec<[u8; 32]> {
 
 fn bench_hashes(c: &mut Criterion) {
     let messages = messages();
+    let secret = custom_secret();
     let gpu = GpuHash::new().expect("Metal GPU is required for this benchmark");
     let prepared = gpu.prepare_batch(&messages).unwrap();
 
@@ -109,6 +136,42 @@ fn bench_hashes(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 gpu.xxhash3_128_with_seed_prepared(SEED, black_box(&prepared))
+                    .unwrap(),
+            )
+        });
+    });
+
+    group.bench_function("twox_hash_xxhash3_64_secret_cpu", |b| {
+        b.iter(|| {
+            black_box(xxhash3_64_secret_cpu(
+                black_box(&messages),
+                black_box(&secret),
+            ))
+        });
+    });
+
+    group.bench_function("gpuhash_xxhash3_64_secret_prepared", |b| {
+        b.iter(|| {
+            black_box(
+                gpu.xxhash3_64_with_secret_prepared(black_box(&secret), black_box(&prepared))
+                    .unwrap(),
+            )
+        });
+    });
+
+    group.bench_function("twox_hash_xxhash3_128_secret_cpu", |b| {
+        b.iter(|| {
+            black_box(xxhash3_128_secret_cpu(
+                black_box(&messages),
+                black_box(&secret),
+            ))
+        });
+    });
+
+    group.bench_function("gpuhash_xxhash3_128_secret_prepared", |b| {
+        b.iter(|| {
+            black_box(
+                gpu.xxhash3_128_with_secret_prepared(black_box(&secret), black_box(&prepared))
                     .unwrap(),
             )
         });

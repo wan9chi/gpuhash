@@ -852,7 +852,7 @@ inline U128Value xxhash3_128_one(device const uchar *data,
                                  ulong seed,
                                  device const uchar *secret,
                                  uint secret_mode,
-    ulong secret_len) {
+                                 ulong secret_len) {
     if (len > 240) {
         if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL) {
             return xxh3_128_large(data, len, secret, secret_len);

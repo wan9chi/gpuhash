@@ -6,6 +6,7 @@ use twox_hash::{XxHash3_64, XxHash3_128, XxHash32, XxHash64};
 const DEFAULT_COUNT: usize = 131_072;
 const DEFAULT_LEN: usize = 4096;
 const SEED: u64 = 0x1234_5678_9abc_def0;
+const CUSTOM_SECRET_LEN: usize = 257;
 
 fn main() -> gpuhash::Result<()> {
     let count = parse_arg(1, DEFAULT_COUNT)?;
@@ -13,6 +14,7 @@ fn main() -> gpuhash::Result<()> {
     println!("messages: {count}, bytes/message: {len}");
 
     let messages = messages(count, len);
+    let secret = custom_secret();
     let gpu = GpuHash::new()?;
     let batch = gpu.prepare_batch(&messages)?;
 
@@ -47,6 +49,22 @@ fn main() -> gpuhash::Result<()> {
         Ok(xxhash3_128_cpu(&messages))
     })?;
     assert_eq!(gpu_xxh3_128, cpu_xxh3_128);
+
+    let gpu_xxh3_64_secret = measure("gpu xxh3-64 secret", batch.total_bytes(), || {
+        gpu.xxhash3_64_with_secret_prepared(&secret, &batch)
+    })?;
+    let cpu_xxh3_64_secret = measure("cpu twox xxh3-64 secret", batch.total_bytes(), || {
+        Ok(xxhash3_64_secret_cpu(&messages, &secret))
+    })?;
+    assert_eq!(gpu_xxh3_64_secret, cpu_xxh3_64_secret);
+
+    let gpu_xxh3_128_secret = measure("gpu xxh3-128 secret", batch.total_bytes(), || {
+        gpu.xxhash3_128_with_secret_prepared(&secret, &batch)
+    })?;
+    let cpu_xxh3_128_secret = measure("cpu twox xxh3-128 secret", batch.total_bytes(), || {
+        Ok(xxhash3_128_secret_cpu(&messages, &secret))
+    })?;
+    assert_eq!(gpu_xxh3_128_secret, cpu_xxh3_128_secret);
 
     let gpu_sha = measure("gpu sha256 prepared", batch.total_bytes(), || {
         gpu.sha256_prepared(&batch)
@@ -83,6 +101,17 @@ fn messages(count: usize, len: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn custom_secret() -> Vec<u8> {
+    (0..CUSTOM_SECRET_LEN)
+        .map(|idx| {
+            (idx as u8)
+                .wrapping_mul(17)
+                .wrapping_add(91)
+                .rotate_left((idx & 7) as u32)
+        })
+        .collect()
+}
+
 fn xxhash64_cpu(input: &[Vec<u8>]) -> Vec<u64> {
     input
         .iter()
@@ -108,6 +137,20 @@ fn xxhash3_128_cpu(input: &[Vec<u8>]) -> Vec<u128> {
     input
         .iter()
         .map(|message| XxHash3_128::oneshot_with_seed(SEED, black_box(message)))
+        .collect()
+}
+
+fn xxhash3_64_secret_cpu(input: &[Vec<u8>], secret: &[u8]) -> Vec<u64> {
+    input
+        .iter()
+        .map(|message| XxHash3_64::oneshot_with_secret(secret, black_box(message)).unwrap())
+        .collect()
+}
+
+fn xxhash3_128_secret_cpu(input: &[Vec<u8>], secret: &[u8]) -> Vec<u128> {
+    input
+        .iter()
+        .map(|message| XxHash3_128::oneshot_with_secret(secret, black_box(message)).unwrap())
         .collect()
 }
 
