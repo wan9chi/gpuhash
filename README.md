@@ -6,8 +6,10 @@ Apple Silicon GPU batch hashing for:
 
 - `xxHash32`, compatible with `twox-hash::XxHash32::oneshot`
 - `xxHash64`, compatible with `twox-hash::XxHash64::oneshot`
-- `XXH3-64`, compatible with `twox-hash::XxHash3_64::oneshot` and `oneshot_with_seed`
-- `XXH3-128`, compatible with `twox-hash::XxHash3_128::oneshot` and `oneshot_with_seed`
+- `XXH3-64`, compatible with `twox-hash::XxHash3_64::oneshot`,
+  `oneshot_with_seed`, and `oneshot_with_secret`
+- `XXH3-128`, compatible with `twox-hash::XxHash3_128::oneshot`,
+  `oneshot_with_seed`, and `oneshot_with_secret`
 - SHA-256, compatible with RustCrypto `sha2::Sha256`
 
 The crate uses Metal compute kernels and `StorageModeShared` buffers. On Apple
@@ -48,4 +50,4 @@ cargo bench --bench hash_batch
 GPU acceleration is a batch API. Single tiny messages are still better served by
 the CPU reference crates because Metal command submission has fixed overhead.
 This crate targets one-shot batch hashing; it does not implement the streaming
-`Hasher` traits or custom-secret XXH3 APIs from `twox-hash`.
+`Hasher` traits from `twox-hash`.

@@ -8,6 +8,9 @@ use std::{mem, ptr, slice};
 
 const SHADERS: &str = include_str!("shaders.metal");
 const MESSAGE_ALIGN: usize = 8;
+const XXH3_SECRET_MINIMUM_LENGTH: usize = 136;
+const XXH3_SECRET_DERIVED_FOR_LARGE: u32 = 0;
+const XXH3_SECRET_CUSTOM_FOR_ALL: u32 = 1;
 const XXH3_DEFAULT_SECRET: [u8; 192] = [
     0xb8, 0xfe, 0x6c, 0x39, 0x23, 0xa4, 0x4b, 0xbe, 0x7c, 0x01, 0x81, 0x2c, 0xf7, 0x21, 0xad, 0x1c,
     0xde, 0xd4, 0x6d, 0xe9, 0x83, 0x90, 0x97, 0xdb, 0x72, 0x40, 0xa4, 0xa4, 0xb7, 0xb3, 0x67, 0x1f,
@@ -51,6 +54,8 @@ struct XxHash64Config {
 struct XxHash3Config {
     seed: u64,
     count: u32,
+    secret_mode: u32,
+    secret_len: u32,
     _pad: u32,
 }
 
@@ -276,17 +281,36 @@ impl GpuHash {
     }
 
     pub fn xxhash3_64(&self, seed: u64, batch: &PreparedBatch) -> Result<Vec<u64>> {
+        let secret = derive_xxh3_secret(seed);
+        self.xxhash3_64_with_secret_mode(seed, batch, &secret, XXH3_SECRET_DERIVED_FOR_LARGE)
+    }
+
+    pub fn xxhash3_64_with_secret(&self, secret: &[u8], batch: &PreparedBatch) -> Result<Vec<u64>> {
+        validate_xxh3_secret(secret)?;
+        self.xxhash3_64_with_secret_mode(0, batch, secret, XXH3_SECRET_CUSTOM_FOR_ALL)
+    }
+
+    fn xxhash3_64_with_secret_mode(
+        &self,
+        seed: u64,
+        batch: &PreparedBatch,
+        secret: &[u8],
+        secret_mode: u32,
+    ) -> Result<Vec<u64>> {
         let mut output = vec![0u64; batch.count];
         if batch.count == 0 {
             return Ok(output);
+        }
+        if secret.len() > u32::MAX as usize {
+            return Err(GpuHashError::InputTooLarge);
         }
 
         let out_buffer = self.device.new_buffer(
             (batch.count * mem::size_of::<u64>()) as u64,
             MTLResourceOptions::StorageModeShared,
         );
-        let config_buffer = self.xxhash3_config_buffer(seed, batch.count);
-        let secret = derive_xxh3_secret(seed);
+        let config_buffer =
+            self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
         let secret_buffer = self.device.new_buffer_with_data(
             secret.as_ptr().cast(),
             secret.len() as u64,
@@ -310,17 +334,40 @@ impl GpuHash {
     }
 
     pub fn xxhash3_128(&self, seed: u64, batch: &PreparedBatch) -> Result<Vec<u128>> {
+        let secret = derive_xxh3_secret(seed);
+        self.xxhash3_128_with_secret_mode(seed, batch, &secret, XXH3_SECRET_DERIVED_FOR_LARGE)
+    }
+
+    pub fn xxhash3_128_with_secret(
+        &self,
+        secret: &[u8],
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u128>> {
+        validate_xxh3_secret(secret)?;
+        self.xxhash3_128_with_secret_mode(0, batch, secret, XXH3_SECRET_CUSTOM_FOR_ALL)
+    }
+
+    fn xxhash3_128_with_secret_mode(
+        &self,
+        seed: u64,
+        batch: &PreparedBatch,
+        secret: &[u8],
+        secret_mode: u32,
+    ) -> Result<Vec<u128>> {
         let mut output = vec![0u128; batch.count];
         if batch.count == 0 {
             return Ok(output);
+        }
+        if secret.len() > u32::MAX as usize {
+            return Err(GpuHashError::InputTooLarge);
         }
 
         let out_buffer = self.device.new_buffer(
             (batch.count * mem::size_of::<[u64; 2]>()) as u64,
             MTLResourceOptions::StorageModeShared,
         );
-        let config_buffer = self.xxhash3_config_buffer(seed, batch.count);
-        let secret = derive_xxh3_secret(seed);
+        let config_buffer =
+            self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
         let secret_buffer = self.device.new_buffer_with_data(
             secret.as_ptr().cast(),
             secret.len() as u64,
@@ -380,10 +427,18 @@ impl GpuHash {
         Ok(output)
     }
 
-    fn xxhash3_config_buffer(&self, seed: u64, count: usize) -> Buffer {
+    fn xxhash3_config_buffer(
+        &self,
+        seed: u64,
+        count: usize,
+        secret_mode: u32,
+        secret_len: usize,
+    ) -> Buffer {
         let config = XxHash3Config {
             seed,
             count: count as u32,
+            secret_mode,
+            secret_len: secret_len as u32,
             _pad: 0,
         };
         self.device.new_buffer_with_data(
@@ -438,6 +493,17 @@ impl GpuHash {
 fn align_up(value: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     (value + align - 1) & !(align - 1)
+}
+
+fn validate_xxh3_secret(secret: &[u8]) -> Result<()> {
+    if secret.len() < XXH3_SECRET_MINIMUM_LENGTH {
+        return Err(GpuHashError::SecretTooShort {
+            minimum: XXH3_SECRET_MINIMUM_LENGTH,
+            actual: secret.len(),
+        });
+    }
+
+    Ok(())
 }
 
 fn derive_xxh3_secret(seed: u64) -> [u8; 192] {

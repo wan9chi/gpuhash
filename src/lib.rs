@@ -15,6 +15,8 @@ pub enum GpuHashError {
     MetalUnavailable,
     /// A Metal API or shader compilation call failed.
     Metal(String),
+    /// The supplied XXH3 custom secret is too short.
+    SecretTooShort { minimum: usize, actual: usize },
     /// The requested input is too large for this API's Metal buffer layout.
     InputTooLarge,
 }
@@ -24,6 +26,12 @@ impl fmt::Display for GpuHashError {
         match self {
             Self::MetalUnavailable => write!(f, "no usable Apple Metal device is available"),
             Self::Metal(message) => write!(f, "Metal error: {message}"),
+            Self::SecretTooShort { minimum, actual } => {
+                write!(
+                    f,
+                    "XXH3 secret is too short: got {actual} bytes, need at least {minimum}"
+                )
+            }
             Self::InputTooLarge => write!(f, "input is too large for the GPU batch layout"),
         }
     }
@@ -160,6 +168,25 @@ impl GpuHash {
         }
     }
 
+    /// Computes `twox_hash::XxHash3_64::oneshot_with_secret(secret, message)`
+    /// for every message.
+    pub fn xxhash3_64_with_secret_prepared(
+        &self,
+        secret: &[u8],
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u64>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.xxhash3_64_with_secret(secret, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (secret, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
     /// Computes `twox_hash::XxHash3_128::oneshot(message)` for every message.
     pub fn xxhash3_128_prepared(&self, batch: &PreparedBatch) -> Result<Vec<u128>> {
         self.xxhash3_128_with_seed_prepared(0, batch)
@@ -179,6 +206,25 @@ impl GpuHash {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (seed, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Computes `twox_hash::XxHash3_128::oneshot_with_secret(secret, message)`
+    /// for every message.
+    pub fn xxhash3_128_with_secret_prepared(
+        &self,
+        secret: &[u8],
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u128>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.xxhash3_128_with_secret(secret, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (secret, batch);
             Err(GpuHashError::MetalUnavailable)
         }
     }
@@ -225,6 +271,17 @@ impl GpuHash {
         self.xxhash3_64_with_seed_prepared(seed, &batch)
     }
 
+    /// Convenience wrapper that prepares and hashes a batch with custom-secret
+    /// XXH3-64.
+    pub fn xxhash3_64_with_secret<M: AsRef<[u8]>>(
+        &self,
+        secret: &[u8],
+        messages: &[M],
+    ) -> Result<Vec<u64>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_64_with_secret_prepared(secret, &batch)
+    }
+
     /// Convenience wrapper that prepares and hashes a batch with XXH3-128.
     pub fn xxhash3_128<M: AsRef<[u8]>>(&self, messages: &[M]) -> Result<Vec<u128>> {
         let batch = self.prepare_batch(messages)?;
@@ -239,6 +296,17 @@ impl GpuHash {
     ) -> Result<Vec<u128>> {
         let batch = self.prepare_batch(messages)?;
         self.xxhash3_128_with_seed_prepared(seed, &batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with custom-secret
+    /// XXH3-128.
+    pub fn xxhash3_128_with_secret<M: AsRef<[u8]>>(
+        &self,
+        secret: &[u8],
+        messages: &[M],
+    ) -> Result<Vec<u128>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_128_with_secret_prepared(secret, &batch)
     }
 
     /// Convenience wrapper that prepares and hashes a batch with SHA-256.
@@ -268,6 +336,14 @@ pub fn xxhash3_64_with_seed_batch<M: AsRef<[u8]>>(seed: u64, messages: &[M]) -> 
     GpuHash::new()?.xxhash3_64_with_seed(seed, messages)
 }
 
+/// Convenience wrapper around [`GpuHash::xxhash3_64_with_secret`].
+pub fn xxhash3_64_with_secret_batch<M: AsRef<[u8]>>(
+    secret: &[u8],
+    messages: &[M],
+) -> Result<Vec<u64>> {
+    GpuHash::new()?.xxhash3_64_with_secret(secret, messages)
+}
+
 /// Convenience wrapper around [`GpuHash::xxhash3_128`].
 pub fn xxhash3_128_batch<M: AsRef<[u8]>>(messages: &[M]) -> Result<Vec<u128>> {
     GpuHash::new()?.xxhash3_128(messages)
@@ -276,6 +352,14 @@ pub fn xxhash3_128_batch<M: AsRef<[u8]>>(messages: &[M]) -> Result<Vec<u128>> {
 /// Convenience wrapper around [`GpuHash::xxhash3_128_with_seed`].
 pub fn xxhash3_128_with_seed_batch<M: AsRef<[u8]>>(seed: u64, messages: &[M]) -> Result<Vec<u128>> {
     GpuHash::new()?.xxhash3_128_with_seed(seed, messages)
+}
+
+/// Convenience wrapper around [`GpuHash::xxhash3_128_with_secret`].
+pub fn xxhash3_128_with_secret_batch<M: AsRef<[u8]>>(
+    secret: &[u8],
+    messages: &[M],
+) -> Result<Vec<u128>> {
+    GpuHash::new()?.xxhash3_128_with_secret(secret, messages)
 }
 
 /// Convenience wrapper around [`GpuHash::sha256`].
@@ -316,6 +400,21 @@ mod tests {
 
     fn fuzz_messages() -> impl Strategy<Value = Vec<Vec<u8>>> {
         prop::collection::vec(prop::collection::vec(any::<u8>(), 0..=4096), 1..=24)
+    }
+
+    fn fuzz_secret() -> impl Strategy<Value = Vec<u8>> {
+        prop::collection::vec(any::<u8>(), 136..=260)
+    }
+
+    fn custom_secret(len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                (i as u8)
+                    .wrapping_mul(17)
+                    .wrapping_add(91)
+                    .rotate_left((i & 7) as u32)
+            })
+            .collect()
     }
 
     #[test]
@@ -360,6 +459,32 @@ mod tests {
     }
 
     #[test]
+    fn xxhash3_64_with_secret_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        for secret_len in [136, 192, 257] {
+            let secret = custom_secret(secret_len);
+            let got = gpu.xxhash3_64_with_secret(&secret, &messages)?;
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot_with_secret(&secret, message).unwrap())
+                .collect();
+            assert_eq!(got, expected, "secret_len {secret_len}");
+        }
+
+        assert_eq!(
+            gpu.xxhash3_64_with_secret(b"too short", &messages),
+            Err(GpuHashError::SecretTooShort {
+                minimum: 136,
+                actual: 9,
+            })
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn xxhash3_128_matches_twox_hash() -> Result<()> {
         let gpu = GpuHash::new()?;
         let messages = sample_messages();
@@ -379,6 +504,32 @@ mod tests {
                 .collect();
             assert_eq!(got, expected, "seed {seed:#x}");
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn xxhash3_128_with_secret_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        for secret_len in [136, 192, 257] {
+            let secret = custom_secret(secret_len);
+            let got = gpu.xxhash3_128_with_secret(&secret, &messages)?;
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_128::oneshot_with_secret(&secret, message).unwrap())
+                .collect();
+            assert_eq!(got, expected, "secret_len {secret_len}");
+        }
+
+        assert_eq!(
+            gpu.xxhash3_128_with_secret(b"too short", &messages),
+            Err(GpuHashError::SecretTooShort {
+                minimum: 136,
+                actual: 9,
+            })
+        );
 
         Ok(())
     }
@@ -489,6 +640,28 @@ mod tests {
             let expected: Vec<_> = messages
                 .iter()
                 .map(|message| XxHash3_128::oneshot_with_seed(seed, message))
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_xxhash3_64_with_secret_matches_twox_hash(secret in fuzz_secret(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash3_64_with_secret(&secret, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot_with_secret(&secret, message).unwrap())
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_xxhash3_128_with_secret_matches_twox_hash(secret in fuzz_secret(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash3_128_with_secret(&secret, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_128::oneshot_with_secret(&secret, message).unwrap())
                 .collect();
             prop_assert_eq!(got, expected);
         }

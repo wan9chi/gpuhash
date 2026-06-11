@@ -22,6 +22,8 @@ struct XxHash64Config {
 struct XxHash3Config {
     ulong seed;
     uint count;
+    uint secret_mode;
+    uint secret_len;
     uint _pad;
 };
 
@@ -43,6 +45,8 @@ constant ulong XXH64_PRIME4 =  9650029242287828579UL;
 constant ulong XXH64_PRIME5 =  2870177450012600261UL;
 constant ulong XXH3_PRIME_MX1 = 0x165667919E3779F9UL;
 constant ulong XXH3_PRIME_MX2 = 0x9FB21C651E98DF25UL;
+constant uint XXH3_SECRET_DERIVED_FOR_LARGE = 0U;
+constant uint XXH3_SECRET_CUSTOM_FOR_ALL = 1U;
 
 constant uchar XXH3_DEFAULT_SECRET[192] = {
     0xb8, 0xfe, 0x6c, 0x39, 0x23, 0xa4, 0x4b, 0xbe, 0x7c, 0x01, 0x81, 0x2c, 0xf7, 0x21, 0xad, 0x1c,
@@ -320,6 +324,27 @@ inline ulong xxh3_derived_secret_u64(device const uchar *secret, ulong offset) {
         | ((ulong)secret[offset + 7] << 56);
 }
 
+inline uint xxh3_derived_secret_u32(device const uchar *secret, ulong offset) {
+    return (uint)secret[offset]
+        | ((uint)secret[offset + 1] << 8)
+        | ((uint)secret[offset + 2] << 16)
+        | ((uint)secret[offset + 3] << 24);
+}
+
+inline ulong xxh3_secret_u64(device const uchar *secret, uint secret_mode, ulong offset) {
+    if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL) {
+        return xxh3_derived_secret_u64(secret, offset);
+    }
+    return xxh3_default_secret_u64(offset);
+}
+
+inline uint xxh3_secret_u32(device const uchar *secret, uint secret_mode, ulong offset) {
+    if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL) {
+        return xxh3_derived_secret_u32(secret, offset);
+    }
+    return xxh3_default_secret_u32(offset);
+}
+
 inline U128Value mul64_to128(ulong a, ulong b) {
     ulong mask = 0xffffffffUL;
     ulong a0 = a & mask;
@@ -362,47 +387,65 @@ inline uint xxh3_1_to_3_combined(device const uchar *data, ulong len) {
         | ((uint)data[len >> 1] << 24);
 }
 
-inline ulong xxh3_mix_step_default(device const uchar *data, ulong secret_offset, ulong seed) {
+inline ulong xxh3_mix_step(device const uchar *data,
+                           device const uchar *secret,
+                           uint secret_mode,
+                           ulong secret_offset,
+                           ulong seed) {
     ulong data0 = read_le64_unaligned(data);
     ulong data1 = read_le64_unaligned(data + 8);
-    ulong secret0 = xxh3_default_secret_u64(secret_offset);
-    ulong secret1 = xxh3_default_secret_u64(secret_offset + 8);
+    ulong secret0 = xxh3_secret_u64(secret, secret_mode, secret_offset);
+    ulong secret1 = xxh3_secret_u64(secret, secret_mode, secret_offset + 8);
     U128Value product = mul64_to128(data0 ^ (secret0 + seed), data1 ^ (secret1 - seed));
     return xor_fold128(product);
 }
 
-inline void xxh3_mix_two_chunks_default(thread ulong acc[2],
-                                        device const uchar *data1,
-                                        device const uchar *data2,
-                                        ulong secret_offset,
-                                        ulong seed) {
+inline void xxh3_mix_two_chunks(thread ulong acc[2],
+                                device const uchar *data1,
+                                device const uchar *data2,
+                                device const uchar *secret,
+                                uint secret_mode,
+                                ulong secret_offset,
+                                ulong seed) {
     ulong data10 = read_le64_unaligned(data1);
     ulong data11 = read_le64_unaligned(data1 + 8);
     ulong data20 = read_le64_unaligned(data2);
     ulong data21 = read_le64_unaligned(data2 + 8);
 
-    acc[0] += xxh3_mix_step_default(data1, secret_offset, seed);
-    acc[1] += xxh3_mix_step_default(data2, secret_offset + 16, seed);
+    acc[0] += xxh3_mix_step(data1, secret, secret_mode, secret_offset, seed);
+    acc[1] += xxh3_mix_step(data2, secret, secret_mode, secret_offset + 16, seed);
     acc[0] ^= data20 + data21;
     acc[1] ^= data10 + data11;
 }
 
-inline ulong xxh3_64_len_0(ulong seed) {
-    return xxh64_avalanche(seed ^ xxh3_default_secret_u64(56) ^ xxh3_default_secret_u64(64));
+inline ulong xxh3_64_len_0(ulong seed, device const uchar *secret, uint secret_mode) {
+    return xxh64_avalanche(seed
+        ^ xxh3_secret_u64(secret, secret_mode, 56)
+        ^ xxh3_secret_u64(secret, secret_mode, 64));
 }
 
-inline ulong xxh3_64_len_1_to_3(device const uchar *data, ulong len, ulong seed) {
+inline ulong xxh3_64_len_1_to_3(device const uchar *data,
+                                 ulong len,
+                                 ulong seed,
+                                 device const uchar *secret,
+                                 uint secret_mode) {
     uint combined = xxh3_1_to_3_combined(data, len);
-    ulong secret = (ulong)(xxh3_default_secret_u32(0) ^ xxh3_default_secret_u32(4));
-    return xxh64_avalanche((secret + seed) ^ (ulong)combined);
+    ulong secret_words = (ulong)(xxh3_secret_u32(secret, secret_mode, 0)
+        ^ xxh3_secret_u32(secret, secret_mode, 4));
+    return xxh64_avalanche((secret_words + seed) ^ (ulong)combined);
 }
 
-inline ulong xxh3_64_len_4_to_8(device const uchar *data, ulong len, ulong seed) {
+inline ulong xxh3_64_len_4_to_8(device const uchar *data,
+                                 ulong len,
+                                 ulong seed,
+                                 device const uchar *secret,
+                                 uint secret_mode) {
     ulong input_first = (ulong)read_le32_unaligned(data);
     ulong input_last = (ulong)read_le32_unaligned(data + len - 4);
     ulong modified_seed = seed ^ ((ulong)bswap32((uint)seed) << 32);
     ulong combined = input_last | (input_first << 32);
-    ulong value = ((xxh3_default_secret_u64(8) ^ xxh3_default_secret_u64(16)) - modified_seed) ^ combined;
+    ulong value = ((xxh3_secret_u64(secret, secret_mode, 8)
+        ^ xxh3_secret_u64(secret, secret_mode, 16)) - modified_seed) ^ combined;
     value ^= rotl64(value, 49) ^ rotl64(value, 24);
     value *= XXH3_PRIME_MX2;
     value ^= (value >> 35) + len;
@@ -411,30 +454,40 @@ inline ulong xxh3_64_len_4_to_8(device const uchar *data, ulong len, ulong seed)
     return value;
 }
 
-inline ulong xxh3_64_len_9_to_16(device const uchar *data, ulong len, ulong seed) {
+inline ulong xxh3_64_len_9_to_16(device const uchar *data,
+                                  ulong len,
+                                  ulong seed,
+                                  device const uchar *secret,
+                                  uint secret_mode) {
     ulong input_first = read_le64_unaligned(data);
     ulong input_last = read_le64_unaligned(data + len - 8);
-    ulong low = ((xxh3_default_secret_u64(24) ^ xxh3_default_secret_u64(32)) + seed) ^ input_first;
-    ulong high = ((xxh3_default_secret_u64(40) ^ xxh3_default_secret_u64(48)) - seed) ^ input_last;
+    ulong low = ((xxh3_secret_u64(secret, secret_mode, 24)
+        ^ xxh3_secret_u64(secret, secret_mode, 32)) + seed) ^ input_first;
+    ulong high = ((xxh3_secret_u64(secret, secret_mode, 40)
+        ^ xxh3_secret_u64(secret, secret_mode, 48)) - seed) ^ input_last;
     U128Value product = mul64_to128(low, high);
     ulong value = len + bswap64(low) + high + xor_fold128(product);
     return xxh3_avalanche(value);
 }
 
-inline ulong xxh3_64_len_17_to_128(device const uchar *data, ulong len, ulong seed) {
+inline ulong xxh3_64_len_17_to_128(device const uchar *data,
+                                    ulong len,
+                                    ulong seed,
+                                    device const uchar *secret,
+                                    uint secret_mode) {
     ulong acc = len * XXH64_PRIME1;
 
-    acc += xxh3_mix_step_default(data, 0, seed);
-    acc += xxh3_mix_step_default(data + len - 16, 16, seed);
+    acc += xxh3_mix_step(data, secret, secret_mode, 0, seed);
+    acc += xxh3_mix_step(data + len - 16, secret, secret_mode, 16, seed);
     if (len > 32) {
-        acc += xxh3_mix_step_default(data + 16, 32, seed);
-        acc += xxh3_mix_step_default(data + len - 32, 48, seed);
+        acc += xxh3_mix_step(data + 16, secret, secret_mode, 32, seed);
+        acc += xxh3_mix_step(data + len - 32, secret, secret_mode, 48, seed);
         if (len > 64) {
-            acc += xxh3_mix_step_default(data + 32, 64, seed);
-            acc += xxh3_mix_step_default(data + len - 48, 80, seed);
+            acc += xxh3_mix_step(data + 32, secret, secret_mode, 64, seed);
+            acc += xxh3_mix_step(data + len - 48, secret, secret_mode, 80, seed);
             if (len > 96) {
-                acc += xxh3_mix_step_default(data + 48, 96, seed);
-                acc += xxh3_mix_step_default(data + len - 64, 112, seed);
+                acc += xxh3_mix_step(data + 48, secret, secret_mode, 96, seed);
+                acc += xxh3_mix_step(data + len - 64, secret, secret_mode, 112, seed);
             }
         }
     }
@@ -442,21 +495,25 @@ inline ulong xxh3_64_len_17_to_128(device const uchar *data, ulong len, ulong se
     return xxh3_avalanche(acc);
 }
 
-inline ulong xxh3_64_len_129_to_240(device const uchar *data, ulong len, ulong seed) {
+inline ulong xxh3_64_len_129_to_240(device const uchar *data,
+                                     ulong len,
+                                     ulong seed,
+                                     device const uchar *secret,
+                                     uint secret_mode) {
     ulong acc = len * XXH64_PRIME1;
     ulong chunks = len / 16;
 
     for (uint i = 0; i < 8; i++) {
-        acc += xxh3_mix_step_default(data + (ulong)i * 16, (ulong)i * 16, seed);
+        acc += xxh3_mix_step(data + (ulong)i * 16, secret, secret_mode, (ulong)i * 16, seed);
     }
 
     acc = xxh3_avalanche(acc);
 
     for (ulong i = 8; i < chunks; i++) {
-        acc += xxh3_mix_step_default(data + i * 16, 3 + (i - 8) * 16, seed);
+        acc += xxh3_mix_step(data + i * 16, secret, secret_mode, 3 + (i - 8) * 16, seed);
     }
 
-    acc += xxh3_mix_step_default(data + len - 16, 119, seed);
+    acc += xxh3_mix_step(data + len - 16, secret, secret_mode, 119, seed);
     return xxh3_avalanche(acc);
 }
 
@@ -485,7 +542,8 @@ inline void xxh3_large_last_round(thread ulong acc[8],
                                   ulong len,
                                   ulong last_block_offset,
                                   ulong last_block_len,
-                                  device const uchar *secret) {
+                                  device const uchar *secret,
+                                  ulong secret_len) {
     ulong full_stripes = last_block_len / 64;
     ulong stripes = (last_block_len % 64 == 0) ? (full_stripes - 1) : full_stripes;
 
@@ -493,7 +551,7 @@ inline void xxh3_large_last_round(thread ulong acc[8],
         xxh3_large_accumulate(acc, data + last_block_offset + i * 64, secret + i * 8);
     }
 
-    xxh3_large_accumulate(acc, data + len - 64, secret + 121);
+    xxh3_large_accumulate(acc, data + len - 64, secret + secret_len - 71);
 }
 
 inline ulong xxh3_large_final_merge(thread ulong acc[8],
@@ -512,9 +570,58 @@ inline ulong xxh3_large_final_merge(thread ulong acc[8],
 inline void xxh3_large_accumulators(device const uchar *data,
                                     ulong len,
                                     device const uchar *secret,
+                                    ulong secret_len,
                                     thread ulong acc[8],
                                     thread ulong &last_block_offset,
                                     thread ulong &last_block_len) {
+    acc[0] = (ulong)XXH32_PRIME3;
+    acc[1] = XXH64_PRIME1;
+    acc[2] = XXH64_PRIME2;
+    acc[3] = XXH64_PRIME3;
+    acc[4] = XXH64_PRIME4;
+    acc[5] = (ulong)XXH32_PRIME2;
+    acc[6] = XXH64_PRIME5;
+    acc[7] = (ulong)XXH32_PRIME1;
+
+    ulong stripes_per_block = (secret_len - 64) / 8;
+    ulong block_size = 64 * stripes_per_block;
+    ulong full_blocks = len / block_size;
+    ulong remainder = len - full_blocks * block_size;
+    ulong blocks_to_process = (remainder == 0) ? (full_blocks - 1) : full_blocks;
+    last_block_offset = blocks_to_process * block_size;
+    last_block_len = (remainder == 0) ? block_size : remainder;
+
+    for (ulong block = 0; block < blocks_to_process; block++) {
+        ulong block_offset = block * block_size;
+        for (ulong stripe = 0; stripe < stripes_per_block; stripe++) {
+            xxh3_large_accumulate(acc, data + block_offset + stripe * 64, secret + stripe * 8);
+        }
+        xxh3_large_scramble(acc, secret + secret_len - 64);
+    }
+}
+
+inline void xxh3_large_last_round_default(thread ulong acc[8],
+                                          device const uchar *data,
+                                          ulong len,
+                                          ulong last_block_offset,
+                                          ulong last_block_len,
+                                          device const uchar *secret) {
+    ulong full_stripes = last_block_len / 64;
+    ulong stripes = (last_block_len % 64 == 0) ? (full_stripes - 1) : full_stripes;
+
+    for (ulong i = 0; i < stripes; i++) {
+        xxh3_large_accumulate(acc, data + last_block_offset + i * 64, secret + i * 8);
+    }
+
+    xxh3_large_accumulate(acc, data + len - 64, secret + 121);
+}
+
+inline void xxh3_large_accumulators_default(device const uchar *data,
+                                            ulong len,
+                                            device const uchar *secret,
+                                            thread ulong acc[8],
+                                            thread ulong &last_block_offset,
+                                            thread ulong &last_block_len) {
     acc[0] = (ulong)XXH32_PRIME3;
     acc[1] = XXH64_PRIME1;
     acc[2] = XXH64_PRIME2;
@@ -539,60 +646,92 @@ inline void xxh3_large_accumulators(device const uchar *data,
     }
 }
 
-inline ulong xxh3_64_large(device const uchar *data, ulong len, device const uchar *secret) {
+inline ulong xxh3_64_large(device const uchar *data,
+                           ulong len,
+                           device const uchar *secret,
+                           ulong secret_len) {
     ulong acc[8];
     ulong last_block_offset;
     ulong last_block_len;
-    xxh3_large_accumulators(data, len, secret, acc, last_block_offset, last_block_len);
-    xxh3_large_last_round(acc, data, len, last_block_offset, last_block_len, secret);
+    xxh3_large_accumulators(data, len, secret, secret_len, acc, last_block_offset, last_block_len);
+    xxh3_large_last_round(acc, data, len, last_block_offset, last_block_len, secret, secret_len);
+    return xxh3_large_final_merge(acc, len * XXH64_PRIME1, secret, 11);
+}
+
+inline ulong xxh3_64_large_default(device const uchar *data, ulong len, device const uchar *secret) {
+    ulong acc[8];
+    ulong last_block_offset;
+    ulong last_block_len;
+    xxh3_large_accumulators_default(data, len, secret, acc, last_block_offset, last_block_len);
+    xxh3_large_last_round_default(acc, data, len, last_block_offset, last_block_len, secret);
     return xxh3_large_final_merge(acc, len * XXH64_PRIME1, secret, 11);
 }
 
 inline ulong xxhash3_64_one(device const uchar *data,
                             ulong len,
                             ulong seed,
-                            device const uchar *derived_secret) {
+                            device const uchar *secret,
+                            uint secret_mode,
+    ulong secret_len) {
     if (len > 240) {
-        return xxh3_64_large(data, len, derived_secret);
+        if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL) {
+            return xxh3_64_large(data, len, secret, secret_len);
+        }
+        return xxh3_64_large_default(data, len, secret);
     }
     if (len >= 129) {
-        return xxh3_64_len_129_to_240(data, len, seed);
+        return xxh3_64_len_129_to_240(data, len, seed, secret, secret_mode);
     }
     if (len >= 17) {
-        return xxh3_64_len_17_to_128(data, len, seed);
+        return xxh3_64_len_17_to_128(data, len, seed, secret, secret_mode);
     }
     if (len >= 9) {
-        return xxh3_64_len_9_to_16(data, len, seed);
+        return xxh3_64_len_9_to_16(data, len, seed, secret, secret_mode);
     }
     if (len >= 4) {
-        return xxh3_64_len_4_to_8(data, len, seed);
+        return xxh3_64_len_4_to_8(data, len, seed, secret, secret_mode);
     }
     if (len >= 1) {
-        return xxh3_64_len_1_to_3(data, len, seed);
+        return xxh3_64_len_1_to_3(data, len, seed, secret, secret_mode);
     }
-    return xxh3_64_len_0(seed);
+    return xxh3_64_len_0(seed, secret, secret_mode);
 }
 
-inline U128Value xxh3_128_len_0(ulong seed) {
-    ulong low = xxh64_avalanche(seed ^ xxh3_default_secret_u64(64) ^ xxh3_default_secret_u64(72));
-    ulong high = xxh64_avalanche(seed ^ xxh3_default_secret_u64(80) ^ xxh3_default_secret_u64(88));
+inline U128Value xxh3_128_len_0(ulong seed, device const uchar *secret, uint secret_mode) {
+    ulong low = xxh64_avalanche(seed
+        ^ xxh3_secret_u64(secret, secret_mode, 64)
+        ^ xxh3_secret_u64(secret, secret_mode, 72));
+    ulong high = xxh64_avalanche(seed
+        ^ xxh3_secret_u64(secret, secret_mode, 80)
+        ^ xxh3_secret_u64(secret, secret_mode, 88));
     return make_u128(low, high);
 }
 
-inline U128Value xxh3_128_len_1_to_3(device const uchar *data, ulong len, ulong seed) {
+inline U128Value xxh3_128_len_1_to_3(device const uchar *data,
+                                      ulong len,
+                                      ulong seed,
+                                      device const uchar *secret,
+                                      uint secret_mode) {
     uint combined = xxh3_1_to_3_combined(data, len);
-    ulong low = ((ulong)(xxh3_default_secret_u32(0) ^ xxh3_default_secret_u32(4)) + seed) ^ (ulong)combined;
+    ulong low = ((ulong)(xxh3_secret_u32(secret, secret_mode, 0)
+        ^ xxh3_secret_u32(secret, secret_mode, 4)) + seed) ^ (ulong)combined;
     uint high_input = rotl32(bswap32(combined), 13);
-    ulong high = ((ulong)(xxh3_default_secret_u32(8) ^ xxh3_default_secret_u32(12)) - seed) ^ (ulong)high_input;
+    ulong high = ((ulong)(xxh3_secret_u32(secret, secret_mode, 8)
+        ^ xxh3_secret_u32(secret, secret_mode, 12)) - seed) ^ (ulong)high_input;
     return make_u128(xxh64_avalanche(low), xxh64_avalanche(high));
 }
 
-inline U128Value xxh3_128_len_4_to_8(device const uchar *data, ulong len, ulong seed) {
+inline U128Value xxh3_128_len_4_to_8(device const uchar *data,
+                                      ulong len,
+                                      ulong seed,
+                                      device const uchar *secret,
+                                      uint secret_mode) {
     ulong input_first = (ulong)read_le32_unaligned(data);
     ulong input_last = (ulong)read_le32_unaligned(data + len - 4);
     ulong modified_seed = seed ^ ((ulong)bswap32((uint)seed) << 32);
     ulong combined = input_first | (input_last << 32);
-    ulong lhs = ((xxh3_default_secret_u64(16) ^ xxh3_default_secret_u64(24)) + modified_seed) ^ combined;
+    ulong lhs = ((xxh3_secret_u64(secret, secret_mode, 16)
+        ^ xxh3_secret_u64(secret, secret_mode, 24)) + modified_seed) ^ combined;
     ulong rhs = XXH64_PRIME1 + (len << 2);
     U128Value product = mul64_to128(lhs, rhs);
     ulong high = product.high + (product.low << 1);
@@ -605,11 +744,17 @@ inline U128Value xxh3_128_len_4_to_8(device const uchar *data, ulong len, ulong 
     return make_u128(low, high);
 }
 
-inline U128Value xxh3_128_len_9_to_16(device const uchar *data, ulong len, ulong seed) {
+inline U128Value xxh3_128_len_9_to_16(device const uchar *data,
+                                       ulong len,
+                                       ulong seed,
+                                       device const uchar *secret,
+                                       uint secret_mode) {
     ulong input_first = read_le64_unaligned(data);
     ulong input_last = read_le64_unaligned(data + len - 8);
-    ulong val1 = ((xxh3_default_secret_u64(32) ^ xxh3_default_secret_u64(40)) - seed) ^ input_first ^ input_last;
-    ulong val2 = ((xxh3_default_secret_u64(48) ^ xxh3_default_secret_u64(56)) + seed) ^ input_last;
+    ulong val1 = ((xxh3_secret_u64(secret, secret_mode, 32)
+        ^ xxh3_secret_u64(secret, secret_mode, 40)) - seed) ^ input_first ^ input_last;
+    ulong val2 = ((xxh3_secret_u64(secret, secret_mode, 48)
+        ^ xxh3_secret_u64(secret, secret_mode, 56)) + seed) ^ input_last;
     U128Value product = mul64_to128(val1, XXH64_PRIME1);
     ulong low = product.low + ((len - 1) << 54);
     ulong high = product.high + (val2 & 0xffffffff00000000UL) + ((val2 & 0xffffffffUL) * (ulong)XXH32_PRIME2);
@@ -627,7 +772,11 @@ inline U128Value xxh3_128_finalize_medium(thread ulong acc[2], ulong len, ulong 
     return make_u128(low, high);
 }
 
-inline U128Value xxh3_128_len_17_to_128(device const uchar *data, ulong len, ulong seed) {
+inline U128Value xxh3_128_len_17_to_128(device const uchar *data,
+                                         ulong len,
+                                         ulong seed,
+                                         device const uchar *secret,
+                                         uint secret_mode) {
     ulong acc[2];
     acc[0] = len * XXH64_PRIME1;
     acc[1] = 0;
@@ -635,44 +784,64 @@ inline U128Value xxh3_128_len_17_to_128(device const uchar *data, ulong len, ulo
     if (len > 32) {
         if (len > 64) {
             if (len > 96) {
-                xxh3_mix_two_chunks_default(acc, data + 48, data + len - 64, 96, seed);
+                xxh3_mix_two_chunks(acc, data + 48, data + len - 64, secret, secret_mode, 96, seed);
             }
-            xxh3_mix_two_chunks_default(acc, data + 32, data + len - 48, 64, seed);
+            xxh3_mix_two_chunks(acc, data + 32, data + len - 48, secret, secret_mode, 64, seed);
         }
-        xxh3_mix_two_chunks_default(acc, data + 16, data + len - 32, 32, seed);
+        xxh3_mix_two_chunks(acc, data + 16, data + len - 32, secret, secret_mode, 32, seed);
     }
-    xxh3_mix_two_chunks_default(acc, data, data + len - 16, 0, seed);
+    xxh3_mix_two_chunks(acc, data, data + len - 16, secret, secret_mode, 0, seed);
 
     return xxh3_128_finalize_medium(acc, len, seed);
 }
 
-inline U128Value xxh3_128_len_129_to_240(device const uchar *data, ulong len, ulong seed) {
+inline U128Value xxh3_128_len_129_to_240(device const uchar *data,
+                                          ulong len,
+                                          ulong seed,
+                                          device const uchar *secret,
+                                          uint secret_mode) {
     ulong acc[2];
     acc[0] = len * XXH64_PRIME1;
     acc[1] = 0;
 
     ulong pair_count = (len / 16) / 2;
     for (uint i = 0; i < 4; i++) {
-        xxh3_mix_two_chunks_default(acc, data + (ulong)i * 32, data + (ulong)i * 32 + 16, (ulong)i * 32, seed);
+        xxh3_mix_two_chunks(acc, data + (ulong)i * 32, data + (ulong)i * 32 + 16, secret, secret_mode, (ulong)i * 32, seed);
     }
 
     acc[0] = xxh3_avalanche(acc[0]);
     acc[1] = xxh3_avalanche(acc[1]);
 
     for (ulong i = 4; i < pair_count; i++) {
-        xxh3_mix_two_chunks_default(acc, data + i * 32, data + i * 32 + 16, 3 + (i - 4) * 32, seed);
+        xxh3_mix_two_chunks(acc, data + i * 32, data + i * 32 + 16, secret, secret_mode, 3 + (i - 4) * 32, seed);
     }
 
-    xxh3_mix_two_chunks_default(acc, data + len - 16, data + len - 32, 103, 0UL - seed);
+    xxh3_mix_two_chunks(acc, data + len - 16, data + len - 32, secret, secret_mode, 103, 0UL - seed);
     return xxh3_128_finalize_medium(acc, len, seed);
 }
 
-inline U128Value xxh3_128_large(device const uchar *data, ulong len, device const uchar *secret) {
+inline U128Value xxh3_128_large(device const uchar *data,
+                                ulong len,
+                                device const uchar *secret,
+                                ulong secret_len) {
     ulong acc[8];
     ulong last_block_offset;
     ulong last_block_len;
-    xxh3_large_accumulators(data, len, secret, acc, last_block_offset, last_block_len);
-    xxh3_large_last_round(acc, data, len, last_block_offset, last_block_len, secret);
+    xxh3_large_accumulators(data, len, secret, secret_len, acc, last_block_offset, last_block_len);
+    xxh3_large_last_round(acc, data, len, last_block_offset, last_block_len, secret, secret_len);
+    ulong low = xxh3_large_final_merge(acc, len * XXH64_PRIME1, secret, 11);
+    ulong high = xxh3_large_final_merge(acc, ~(len * XXH64_PRIME2), secret, secret_len - 75);
+    return make_u128(low, high);
+}
+
+inline U128Value xxh3_128_large_default(device const uchar *data,
+                                        ulong len,
+                                        device const uchar *secret) {
+    ulong acc[8];
+    ulong last_block_offset;
+    ulong last_block_len;
+    xxh3_large_accumulators_default(data, len, secret, acc, last_block_offset, last_block_len);
+    xxh3_large_last_round_default(acc, data, len, last_block_offset, last_block_len, secret);
     ulong low = xxh3_large_final_merge(acc, len * XXH64_PRIME1, secret, 11);
     ulong high = xxh3_large_final_merge(acc, ~(len * XXH64_PRIME2), secret, 117);
     return make_u128(low, high);
@@ -681,54 +850,73 @@ inline U128Value xxh3_128_large(device const uchar *data, ulong len, device cons
 inline U128Value xxhash3_128_one(device const uchar *data,
                                  ulong len,
                                  ulong seed,
-                                 device const uchar *derived_secret) {
+                                 device const uchar *secret,
+                                 uint secret_mode,
+    ulong secret_len) {
     if (len > 240) {
-        return xxh3_128_large(data, len, derived_secret);
+        if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL) {
+            return xxh3_128_large(data, len, secret, secret_len);
+        }
+        return xxh3_128_large_default(data, len, secret);
     }
     if (len >= 129) {
-        return xxh3_128_len_129_to_240(data, len, seed);
+        return xxh3_128_len_129_to_240(data, len, seed, secret, secret_mode);
     }
     if (len >= 17) {
-        return xxh3_128_len_17_to_128(data, len, seed);
+        return xxh3_128_len_17_to_128(data, len, seed, secret, secret_mode);
     }
     if (len >= 9) {
-        return xxh3_128_len_9_to_16(data, len, seed);
+        return xxh3_128_len_9_to_16(data, len, seed, secret, secret_mode);
     }
     if (len >= 4) {
-        return xxh3_128_len_4_to_8(data, len, seed);
+        return xxh3_128_len_4_to_8(data, len, seed, secret, secret_mode);
     }
     if (len >= 1) {
-        return xxh3_128_len_1_to_3(data, len, seed);
+        return xxh3_128_len_1_to_3(data, len, seed, secret, secret_mode);
     }
-    return xxh3_128_len_0(seed);
+    return xxh3_128_len_0(seed, secret, secret_mode);
 }
 
 kernel void xxhash3_64_batch(device const uchar *input [[buffer(0)]],
                              device const MessageDesc *descs [[buffer(1)]],
                              device ulong *output [[buffer(2)]],
                              constant XxHash3Config &config [[buffer(3)]],
-                             device const uchar *derived_secret [[buffer(4)]],
+                             device const uchar *secret [[buffer(4)]],
                              uint gid [[thread_position_in_grid]]) {
     if (gid >= config.count) {
         return;
     }
 
     MessageDesc desc = descs[gid];
-    output[gid] = xxhash3_64_one(input + desc.offset, desc.len, config.seed, derived_secret);
+    output[gid] = xxhash3_64_one(
+        input + desc.offset,
+        desc.len,
+        config.seed,
+        secret,
+        config.secret_mode,
+        (ulong)config.secret_len
+    );
 }
 
 kernel void xxhash3_128_batch(device const uchar *input [[buffer(0)]],
                               device const MessageDesc *descs [[buffer(1)]],
                               device ulong2 *output [[buffer(2)]],
                               constant XxHash3Config &config [[buffer(3)]],
-                              device const uchar *derived_secret [[buffer(4)]],
+                              device const uchar *secret [[buffer(4)]],
                               uint gid [[thread_position_in_grid]]) {
     if (gid >= config.count) {
         return;
     }
 
     MessageDesc desc = descs[gid];
-    U128Value hash = xxhash3_128_one(input + desc.offset, desc.len, config.seed, derived_secret);
+    U128Value hash = xxhash3_128_one(
+        input + desc.offset,
+        desc.len,
+        config.seed,
+        secret,
+        config.secret_mode,
+        (ulong)config.secret_len
+    );
     output[gid] = ulong2(hash.low, hash.high);
 }
 
