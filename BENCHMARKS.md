@@ -16,8 +16,8 @@ The same benchmark runs in the
 [GitHub Actions benchmark job](https://github.com/wan9chi/gpuhash/actions/workflows/ci.yml?query=branch%3Amain).
 Each run uploads the Criterion report as the `criterion-report` artifact.
 Example successful benchmark job:
-[run 27378146796 / job 80907945549](https://github.com/wan9chi/gpuhash/actions/runs/27378146796/job/80907945549),
-with `criterion-report` artifact id `7577230947`.
+[run 27379358286 / job 80911929636](https://github.com/wan9chi/gpuhash/actions/runs/27379358286/job/80911929636),
+with `criterion-report` artifact id `7577691995`.
 
 Benchmark batch:
 
