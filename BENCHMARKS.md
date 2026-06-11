@@ -30,20 +30,20 @@ Criterion results:
 
 | Benchmark | Mean time | Throughput | Speedup |
 | --- | ---: | ---: | ---: |
-| `twox_hash_xxhash32_cpu` | 66.061 ms | 7.5688 GiB/s | 1.0x |
-| `gpuhash_xxhash32_prepared` | 3.0584 ms | 163.49 GiB/s | 21.60x |
-| `twox_hash_xxhash64_cpu` | 20.409 ms | 24.499 GiB/s | 1.0x |
-| `gpuhash_xxhash64_prepared` | 3.0567 ms | 163.57 GiB/s | 6.68x |
-| `twox_hash_xxhash3_64_cpu` | 10.934 ms | 45.729 GiB/s | 1.0x |
-| `gpuhash_xxhash3_64_prepared` | 3.2281 ms | 154.89 GiB/s | 3.39x |
-| `twox_hash_xxhash3_128_cpu` | 11.316 ms | 44.185 GiB/s | 1.0x |
-| `gpuhash_xxhash3_128_prepared` | 3.2633 ms | 153.22 GiB/s | 3.47x |
-| `twox_hash_xxhash3_64_secret_cpu` | 11.411 ms | 43.818 GiB/s | 1.0x |
-| `gpuhash_xxhash3_64_secret_prepared` | 3.2538 ms | 153.67 GiB/s | 3.51x |
-| `twox_hash_xxhash3_128_secret_cpu` | 11.563 ms | 43.240 GiB/s | 1.0x |
-| `gpuhash_xxhash3_128_secret_prepared` | 3.2883 ms | 152.05 GiB/s | 3.52x |
-| `rustcrypto_sha256_cpu` | 165.50 ms | 3.0211 GiB/s | 1.0x |
-| `gpuhash_sha256_prepared` | 12.813 ms | 39.024 GiB/s | 12.92x |
+| `twox_hash_xxhash32_cpu` | 68.158 ms | 7.3359 GiB/s | 1.0x |
+| `gpuhash_xxhash32_prepared` | 3.0392 ms | 164.52 GiB/s | 22.43x |
+| `twox_hash_xxhash64_cpu` | 20.656 ms | 24.206 GiB/s | 1.0x |
+| `gpuhash_xxhash64_prepared` | 3.0609 ms | 163.35 GiB/s | 6.75x |
+| `twox_hash_xxhash3_64_cpu` | 11.533 ms | 43.354 GiB/s | 1.0x |
+| `gpuhash_xxhash3_64_prepared` | 3.1916 ms | 156.66 GiB/s | 3.61x |
+| `twox_hash_xxhash3_128_cpu` | 11.687 ms | 42.783 GiB/s | 1.0x |
+| `gpuhash_xxhash3_128_prepared` | 3.2612 ms | 153.32 GiB/s | 3.58x |
+| `twox_hash_xxhash3_64_secret_cpu` | 11.860 ms | 42.158 GiB/s | 1.0x |
+| `gpuhash_xxhash3_64_secret_prepared` | 3.2470 ms | 153.99 GiB/s | 3.65x |
+| `twox_hash_xxhash3_128_secret_cpu` | 11.968 ms | 41.777 GiB/s | 1.0x |
+| `gpuhash_xxhash3_128_secret_prepared` | 3.2671 ms | 153.04 GiB/s | 3.66x |
+| `rustcrypto_sha256_cpu` | 165.42 ms | 3.0226 GiB/s | 1.0x |
+| `gpuhash_sha256_prepared` | 12.576 ms | 39.759 GiB/s | 13.15x |
 
 The quick benchmark is useful for a one-shot sanity check:
 

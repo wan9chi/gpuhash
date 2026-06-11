@@ -47,6 +47,7 @@ constant ulong XXH3_PRIME_MX1 = 0x165667919E3779F9UL;
 constant ulong XXH3_PRIME_MX2 = 0x9FB21C651E98DF25UL;
 constant uint XXH3_SECRET_DERIVED_FOR_LARGE = 0U;
 constant uint XXH3_SECRET_CUSTOM_FOR_ALL = 1U;
+constant uint XXH3_SECRET_CUSTOM_FOR_LARGE = 2U;
 
 constant uchar XXH3_DEFAULT_SECRET[192] = {
     0xb8, 0xfe, 0x6c, 0x39, 0x23, 0xa4, 0x4b, 0xbe, 0x7c, 0x01, 0x81, 0x2c, 0xf7, 0x21, 0xad, 0x1c,
@@ -674,7 +675,7 @@ inline ulong xxhash3_64_one(device const uchar *data,
                             uint secret_mode,
     ulong secret_len) {
     if (len > 240) {
-        if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL) {
+        if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL || secret_mode == XXH3_SECRET_CUSTOM_FOR_LARGE) {
             return xxh3_64_large(data, len, secret, secret_len);
         }
         return xxh3_64_large_default(data, len, secret);
@@ -854,7 +855,7 @@ inline U128Value xxhash3_128_one(device const uchar *data,
                                  uint secret_mode,
                                  ulong secret_len) {
     if (len > 240) {
-        if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL) {
+        if (secret_mode == XXH3_SECRET_CUSTOM_FOR_ALL || secret_mode == XXH3_SECRET_CUSTOM_FOR_LARGE) {
             return xxh3_128_large(data, len, secret, secret_len);
         }
         return xxh3_128_large_default(data, len, secret);
@@ -940,11 +941,11 @@ constant uint SHA256_K[64] = {
 };
 
 inline uint sha256_ch(uint x, uint y, uint z) {
-    return (x & y) ^ (~x & z);
+    return z ^ (x & (y ^ z));
 }
 
 inline uint sha256_maj(uint x, uint y, uint z) {
-    return (x & y) ^ (x & z) ^ (y & z);
+    return (x & y) ^ (z & (x ^ y));
 }
 
 inline uint sha256_big_sigma0(uint x) {
@@ -1001,6 +1002,28 @@ inline void sha256_store_be32(device uchar *output, uint value) {
     output[3] = (uchar)value;
 }
 
+inline void sha256_round(thread uint &a,
+                         thread uint &b,
+                         thread uint &c,
+                         thread uint &d,
+                         thread uint &e,
+                         thread uint &f,
+                         thread uint &g,
+                         thread uint &h,
+                         uint k,
+                         uint w) {
+    uint t1 = h + sha256_big_sigma1(e) + sha256_ch(e, f, g) + k + w;
+    uint t2 = sha256_big_sigma0(a) + sha256_maj(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+}
+
 inline void sha256_one(device const uchar *data, ulong len, device uchar *digest) {
     uint h0 = 0x6a09e667U;
     uint h1 = 0xbb67ae85U;
@@ -1014,13 +1037,9 @@ inline void sha256_one(device const uchar *data, ulong len, device uchar *digest
     ulong padded_len = ((len + 9 + 63) / 64) * 64;
 
     for (ulong block = 0; block < padded_len; block += 64) {
-        uint w[64];
+        uint w[16];
         for (uint i = 0; i < 16; i++) {
             w[i] = sha256_padded_word(data, len, padded_len, block + (ulong)i * 4);
-        }
-        for (uint i = 16; i < 64; i++) {
-            w[i] = sha256_small_sigma1(w[i - 2]) + w[i - 7]
-                + sha256_small_sigma0(w[i - 15]) + w[i - 16];
         }
 
         uint a = h0;
@@ -1032,17 +1051,16 @@ inline void sha256_one(device const uchar *data, ulong len, device uchar *digest
         uint g = h6;
         uint h = h7;
 
-        for (uint i = 0; i < 64; i++) {
-            uint t1 = h + sha256_big_sigma1(e) + sha256_ch(e, f, g) + SHA256_K[i] + w[i];
-            uint t2 = sha256_big_sigma0(a) + sha256_maj(a, b, c);
-            h = g;
-            g = f;
-            f = e;
-            e = d + t1;
-            d = c;
-            c = b;
-            b = a;
-            a = t1 + t2;
+        for (uint i = 0; i < 16; i++) {
+            sha256_round(a, b, c, d, e, f, g, h, SHA256_K[i], w[i]);
+        }
+
+        for (uint i = 16; i < 64; i++) {
+            uint slot = i & 15;
+            uint word = sha256_small_sigma1(w[(i + 14) & 15]) + w[(i + 9) & 15]
+                + sha256_small_sigma0(w[(i + 1) & 15]) + w[slot];
+            w[slot] = word;
+            sha256_round(a, b, c, d, e, f, g, h, SHA256_K[i], word);
         }
 
         h0 += a;

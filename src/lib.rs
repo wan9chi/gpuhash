@@ -3,10 +3,13 @@
 #[cfg(target_os = "macos")]
 mod metal_backend;
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, hash};
 
 /// Result type used by this crate.
 pub type Result<T> = std::result::Result<T, GpuHashError>;
+
+/// Minimum byte length for XXH3 custom secrets.
+pub const XXH3_SECRET_MINIMUM_LENGTH: usize = 136;
 
 /// Errors returned by the GPU backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +41,17 @@ impl fmt::Display for GpuHashError {
 }
 
 impl Error for GpuHashError {}
+
+fn validate_xxh3_secret(secret: &[u8]) -> Result<()> {
+    if secret.len() < XXH3_SECRET_MINIMUM_LENGTH {
+        return Err(GpuHashError::SecretTooShort {
+            minimum: XXH3_SECRET_MINIMUM_LENGTH,
+            actual: secret.len(),
+        });
+    }
+
+    Ok(())
+}
 
 /// A reusable batch of messages stored in Apple Silicon shared memory.
 ///
@@ -187,6 +201,27 @@ impl GpuHash {
         }
     }
 
+    /// Computes `twox_hash::XxHash3_64::oneshot_with_seed_and_secret(seed, secret, message)`
+    /// for every message.
+    pub fn xxhash3_64_with_seed_and_secret_prepared(
+        &self,
+        seed: u64,
+        secret: &[u8],
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u64>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner
+                .xxhash3_64_with_seed_and_secret(seed, secret, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (seed, secret, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
     /// Computes `twox_hash::XxHash3_128::oneshot(message)` for every message.
     pub fn xxhash3_128_prepared(&self, batch: &PreparedBatch) -> Result<Vec<u128>> {
         self.xxhash3_128_with_seed_prepared(0, batch)
@@ -225,6 +260,27 @@ impl GpuHash {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (secret, batch);
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Computes `twox_hash::XxHash3_128::oneshot_with_seed_and_secret(seed, secret, message)`
+    /// for every message.
+    pub fn xxhash3_128_with_seed_and_secret_prepared(
+        &self,
+        seed: u64,
+        secret: &[u8],
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u128>> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner
+                .xxhash3_128_with_seed_and_secret(seed, secret, &batch.inner)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (seed, secret, batch);
             Err(GpuHashError::MetalUnavailable)
         }
     }
@@ -282,6 +338,18 @@ impl GpuHash {
         self.xxhash3_64_with_secret_prepared(secret, &batch)
     }
 
+    /// Convenience wrapper that prepares and hashes a batch with seeded,
+    /// custom-secret XXH3-64.
+    pub fn xxhash3_64_with_seed_and_secret<M: AsRef<[u8]>>(
+        &self,
+        seed: u64,
+        secret: &[u8],
+        messages: &[M],
+    ) -> Result<Vec<u64>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_64_with_seed_and_secret_prepared(seed, secret, &batch)
+    }
+
     /// Convenience wrapper that prepares and hashes a batch with XXH3-128.
     pub fn xxhash3_128<M: AsRef<[u8]>>(&self, messages: &[M]) -> Result<Vec<u128>> {
         let batch = self.prepare_batch(messages)?;
@@ -307,6 +375,18 @@ impl GpuHash {
     ) -> Result<Vec<u128>> {
         let batch = self.prepare_batch(messages)?;
         self.xxhash3_128_with_secret_prepared(secret, &batch)
+    }
+
+    /// Convenience wrapper that prepares and hashes a batch with seeded,
+    /// custom-secret XXH3-128.
+    pub fn xxhash3_128_with_seed_and_secret<M: AsRef<[u8]>>(
+        &self,
+        seed: u64,
+        secret: &[u8],
+        messages: &[M],
+    ) -> Result<Vec<u128>> {
+        let batch = self.prepare_batch(messages)?;
+        self.xxhash3_128_with_seed_and_secret_prepared(seed, secret, &batch)
     }
 
     /// Convenience wrapper that prepares and hashes a batch with SHA-256.
@@ -344,6 +424,15 @@ pub fn xxhash3_64_with_secret_batch<M: AsRef<[u8]>>(
     GpuHash::new()?.xxhash3_64_with_secret(secret, messages)
 }
 
+/// Convenience wrapper around [`GpuHash::xxhash3_64_with_seed_and_secret`].
+pub fn xxhash3_64_with_seed_and_secret_batch<M: AsRef<[u8]>>(
+    seed: u64,
+    secret: &[u8],
+    messages: &[M],
+) -> Result<Vec<u64>> {
+    GpuHash::new()?.xxhash3_64_with_seed_and_secret(seed, secret, messages)
+}
+
 /// Convenience wrapper around [`GpuHash::xxhash3_128`].
 pub fn xxhash3_128_batch<M: AsRef<[u8]>>(messages: &[M]) -> Result<Vec<u128>> {
     GpuHash::new()?.xxhash3_128(messages)
@@ -362,9 +451,366 @@ pub fn xxhash3_128_with_secret_batch<M: AsRef<[u8]>>(
     GpuHash::new()?.xxhash3_128_with_secret(secret, messages)
 }
 
+/// Convenience wrapper around [`GpuHash::xxhash3_128_with_seed_and_secret`].
+pub fn xxhash3_128_with_seed_and_secret_batch<M: AsRef<[u8]>>(
+    seed: u64,
+    secret: &[u8],
+    messages: &[M],
+) -> Result<Vec<u128>> {
+    GpuHash::new()?.xxhash3_128_with_seed_and_secret(seed, secret, messages)
+}
+
 /// Convenience wrapper around [`GpuHash::sha256`].
 pub fn sha256_batch<M: AsRef<[u8]>>(messages: &[M]) -> Result<Vec<[u8; 32]>> {
     GpuHash::new()?.sha256(messages)
+}
+
+/// Buffered GPU-backed xxHash32 hasher.
+///
+/// This compatibility surface collects streaming writes and finalizes with the
+/// Metal one-shot kernel. Use [`GpuHash::xxhash32_prepared`] for high-throughput
+/// batches.
+pub struct GpuXxHash32 {
+    engine: GpuHash,
+    seed: u32,
+    bytes: Vec<u8>,
+}
+
+impl GpuXxHash32 {
+    /// Constructs a hasher with seed 0.
+    pub fn new() -> Result<Self> {
+        Self::with_seed(0)
+    }
+
+    /// Constructs a hasher with an initial seed.
+    pub fn with_seed(seed: u32) -> Result<Self> {
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed,
+            bytes: Vec::new(),
+        })
+    }
+
+    /// The seed this hasher was created with.
+    #[must_use]
+    pub fn seed(&self) -> u32 {
+        self.seed
+    }
+
+    /// The total number of bytes written.
+    #[must_use]
+    pub fn total_len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Writes more bytes into this hasher.
+    pub fn write(&mut self, input: &[u8]) {
+        self.bytes.extend_from_slice(input);
+    }
+
+    /// Returns the current 32-bit hash value.
+    pub fn finish_32(&self) -> Result<u32> {
+        let messages = [self.bytes.as_slice()];
+        Ok(self.engine.xxhash32(self.seed, &messages)?[0])
+    }
+}
+
+impl Default for GpuXxHash32 {
+    fn default() -> Self {
+        Self::new().expect("failed to create default GPU xxHash32 hasher")
+    }
+}
+
+impl hash::Hasher for GpuXxHash32 {
+    fn write(&mut self, bytes: &[u8]) {
+        Self::write(self, bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        self.finish_32()
+            .expect("failed to finish GPU xxHash32 hasher") as u64
+    }
+}
+
+/// Buffered GPU-backed xxHash64 hasher.
+pub struct GpuXxHash64 {
+    engine: GpuHash,
+    seed: u64,
+    bytes: Vec<u8>,
+}
+
+impl GpuXxHash64 {
+    /// Constructs a hasher with seed 0.
+    pub fn new() -> Result<Self> {
+        Self::with_seed(0)
+    }
+
+    /// Constructs a hasher with an initial seed.
+    pub fn with_seed(seed: u64) -> Result<Self> {
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed,
+            bytes: Vec::new(),
+        })
+    }
+
+    /// The seed this hasher was created with.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// The total number of bytes written.
+    #[must_use]
+    pub fn total_len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Writes more bytes into this hasher.
+    pub fn write(&mut self, input: &[u8]) {
+        self.bytes.extend_from_slice(input);
+    }
+
+    /// Returns the current 64-bit hash value.
+    pub fn finish_64(&self) -> Result<u64> {
+        let messages = [self.bytes.as_slice()];
+        Ok(self.engine.xxhash64(self.seed, &messages)?[0])
+    }
+}
+
+impl Default for GpuXxHash64 {
+    fn default() -> Self {
+        Self::new().expect("failed to create default GPU xxHash64 hasher")
+    }
+}
+
+impl hash::Hasher for GpuXxHash64 {
+    fn write(&mut self, bytes: &[u8]) {
+        Self::write(self, bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        self.finish_64()
+            .expect("failed to finish GPU xxHash64 hasher")
+    }
+}
+
+enum Xxh3SecretMode {
+    Seeded,
+    Secret(Vec<u8>),
+    SeedAndSecret(Vec<u8>),
+}
+
+/// Buffered GPU-backed XXH3-64 hasher.
+pub struct GpuXxHash3_64 {
+    engine: GpuHash,
+    seed: u64,
+    secret_mode: Xxh3SecretMode,
+    bytes: Vec<u8>,
+}
+
+impl GpuXxHash3_64 {
+    /// Constructs a hasher with the default seed and secret.
+    pub fn new() -> Result<Self> {
+        Self::with_seed(0)
+    }
+
+    /// Constructs a hasher with a seed-derived secret.
+    pub fn with_seed(seed: u64) -> Result<Self> {
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed,
+            secret_mode: Xxh3SecretMode::Seeded,
+            bytes: Vec::new(),
+        })
+    }
+
+    /// Constructs a hasher with the default seed and a custom secret.
+    pub fn with_secret(secret: impl Into<Vec<u8>>) -> Result<Self> {
+        let secret = secret.into();
+        validate_xxh3_secret(&secret)?;
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed: 0,
+            secret_mode: Xxh3SecretMode::Secret(secret),
+            bytes: Vec::new(),
+        })
+    }
+
+    /// Constructs a hasher with a seed and custom secret.
+    pub fn with_seed_and_secret(seed: u64, secret: impl Into<Vec<u8>>) -> Result<Self> {
+        let secret = secret.into();
+        validate_xxh3_secret(&secret)?;
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed,
+            secret_mode: Xxh3SecretMode::SeedAndSecret(secret),
+            bytes: Vec::new(),
+        })
+    }
+
+    /// The total number of bytes written.
+    #[must_use]
+    pub fn total_len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Writes more bytes into this hasher.
+    pub fn write(&mut self, input: &[u8]) {
+        self.bytes.extend_from_slice(input);
+    }
+
+    /// Returns the current 64-bit XXH3 value.
+    pub fn finish_64(&self) -> Result<u64> {
+        let messages = [self.bytes.as_slice()];
+        let output = match &self.secret_mode {
+            Xxh3SecretMode::Seeded => self.engine.xxhash3_64_with_seed(self.seed, &messages)?,
+            Xxh3SecretMode::Secret(secret) => {
+                self.engine.xxhash3_64_with_secret(secret, &messages)?
+            }
+            Xxh3SecretMode::SeedAndSecret(secret) => self
+                .engine
+                .xxhash3_64_with_seed_and_secret(self.seed, secret, &messages)?,
+        };
+        Ok(output[0])
+    }
+}
+
+impl Default for GpuXxHash3_64 {
+    fn default() -> Self {
+        Self::new().expect("failed to create default GPU XXH3-64 hasher")
+    }
+}
+
+impl hash::Hasher for GpuXxHash3_64 {
+    fn write(&mut self, bytes: &[u8]) {
+        Self::write(self, bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        self.finish_64()
+            .expect("failed to finish GPU XXH3-64 hasher")
+    }
+}
+
+/// Buffered GPU-backed XXH3-128 hasher.
+pub struct GpuXxHash3_128 {
+    engine: GpuHash,
+    seed: u64,
+    secret_mode: Xxh3SecretMode,
+    bytes: Vec<u8>,
+}
+
+impl GpuXxHash3_128 {
+    /// Constructs a hasher with the default seed and secret.
+    pub fn new() -> Result<Self> {
+        Self::with_seed(0)
+    }
+
+    /// Constructs a hasher with a seed-derived secret.
+    pub fn with_seed(seed: u64) -> Result<Self> {
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed,
+            secret_mode: Xxh3SecretMode::Seeded,
+            bytes: Vec::new(),
+        })
+    }
+
+    /// Constructs a hasher with the default seed and a custom secret.
+    pub fn with_secret(secret: impl Into<Vec<u8>>) -> Result<Self> {
+        let secret = secret.into();
+        validate_xxh3_secret(&secret)?;
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed: 0,
+            secret_mode: Xxh3SecretMode::Secret(secret),
+            bytes: Vec::new(),
+        })
+    }
+
+    /// Constructs a hasher with a seed and custom secret.
+    pub fn with_seed_and_secret(seed: u64, secret: impl Into<Vec<u8>>) -> Result<Self> {
+        let secret = secret.into();
+        validate_xxh3_secret(&secret)?;
+        Ok(Self {
+            engine: GpuHash::new()?,
+            seed,
+            secret_mode: Xxh3SecretMode::SeedAndSecret(secret),
+            bytes: Vec::new(),
+        })
+    }
+
+    /// The total number of bytes written.
+    #[must_use]
+    pub fn total_len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Writes more bytes into this hasher.
+    pub fn write(&mut self, input: &[u8]) {
+        self.bytes.extend_from_slice(input);
+    }
+
+    /// Returns the current 128-bit XXH3 value.
+    pub fn finish_128(&self) -> Result<u128> {
+        let messages = [self.bytes.as_slice()];
+        let output = match &self.secret_mode {
+            Xxh3SecretMode::Seeded => self.engine.xxhash3_128_with_seed(self.seed, &messages)?,
+            Xxh3SecretMode::Secret(secret) => {
+                self.engine.xxhash3_128_with_secret(secret, &messages)?
+            }
+            Xxh3SecretMode::SeedAndSecret(secret) => self
+                .engine
+                .xxhash3_128_with_seed_and_secret(self.seed, secret, &messages)?,
+        };
+        Ok(output[0])
+    }
+}
+
+impl Default for GpuXxHash3_128 {
+    fn default() -> Self {
+        Self::new().expect("failed to create default GPU XXH3-128 hasher")
+    }
+}
+
+/// Buffered GPU-backed SHA-256 hasher.
+pub struct GpuSha256 {
+    engine: GpuHash,
+    bytes: Vec<u8>,
+}
+
+impl GpuSha256 {
+    /// Constructs a SHA-256 hasher.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            engine: GpuHash::new()?,
+            bytes: Vec::new(),
+        })
+    }
+
+    /// The total number of bytes written.
+    #[must_use]
+    pub fn total_len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Writes more bytes into this hasher.
+    pub fn write(&mut self, input: &[u8]) {
+        self.bytes.extend_from_slice(input);
+    }
+
+    /// Finalizes the current byte stream as a SHA-256 digest.
+    pub fn finalize(&self) -> Result<[u8; 32]> {
+        let messages = [self.bytes.as_slice()];
+        Ok(self.engine.sha256(&messages)?[0])
+    }
+}
+
+impl Default for GpuSha256 {
+    fn default() -> Self {
+        Self::new().expect("failed to create default GPU SHA-256 hasher")
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +818,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use sha2::{Digest as _, Sha256};
+    use std::hash::Hasher as StdHasher;
     use twox_hash::{XxHash3_64, XxHash3_128, XxHash32, XxHash64};
 
     fn sample_messages() -> Vec<Vec<u8>> {
@@ -415,6 +862,18 @@ mod tests {
                     .rotate_left((i & 7) as u32)
             })
             .collect()
+    }
+
+    fn write_chunks(mut write: impl FnMut(&[u8]), input: &[u8]) {
+        let mut offset = 0usize;
+        for chunk_len in [1usize, 7, 3, 64, 2, 19, 251].into_iter().cycle() {
+            if offset >= input.len() {
+                break;
+            }
+            let end = offset.saturating_add(chunk_len).min(input.len());
+            write(&input[offset..end]);
+            offset = end;
+        }
     }
 
     #[test]
@@ -485,6 +944,28 @@ mod tests {
     }
 
     #[test]
+    fn xxhash3_64_with_seed_and_secret_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        for seed in [0, 1, 1234, u64::MAX, 0xdead_cafe_beef_f00d] {
+            for secret_len in [136, 192, 257] {
+                let secret = custom_secret(secret_len);
+                let got = gpu.xxhash3_64_with_seed_and_secret(seed, &secret, &messages)?;
+                let expected: Vec<_> = messages
+                    .iter()
+                    .map(|message| {
+                        XxHash3_64::oneshot_with_seed_and_secret(seed, &secret, message).unwrap()
+                    })
+                    .collect();
+                assert_eq!(got, expected, "seed {seed:#x}, secret_len {secret_len}");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn xxhash3_128_matches_twox_hash() -> Result<()> {
         let gpu = GpuHash::new()?;
         let messages = sample_messages();
@@ -530,6 +1011,28 @@ mod tests {
                 actual: 9,
             })
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn xxhash3_128_with_seed_and_secret_matches_twox_hash() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let messages = sample_messages();
+
+        for seed in [0, 1, 1234, u64::MAX, 0xdead_cafe_beef_f00d] {
+            for secret_len in [136, 192, 257] {
+                let secret = custom_secret(secret_len);
+                let got = gpu.xxhash3_128_with_seed_and_secret(seed, &secret, &messages)?;
+                let expected: Vec<_> = messages
+                    .iter()
+                    .map(|message| {
+                        XxHash3_128::oneshot_with_seed_and_secret(seed, &secret, message).unwrap()
+                    })
+                    .collect();
+                assert_eq!(got, expected, "seed {seed:#x}, secret_len {secret_len}");
+            }
+        }
 
         Ok(())
     }
@@ -594,6 +1097,82 @@ mod tests {
         let sha_first = gpu.sha256_prepared(&batch)?;
         let sha_second = gpu.sha256_prepared(&batch)?;
         assert_eq!(sha_first, sha_second);
+        Ok(())
+    }
+
+    #[test]
+    fn buffered_hashers_match_streaming_references() -> Result<()> {
+        for message in sample_messages() {
+            let mut expected32 = XxHash32::with_seed(0xdead_cafe);
+            let mut got32 = GpuXxHash32::with_seed(0xdead_cafe)?;
+            write_chunks(
+                |chunk| {
+                    StdHasher::write(&mut expected32, chunk);
+                    got32.write(chunk);
+                },
+                &message,
+            );
+            assert_eq!(got32.finish_32()?, expected32.finish_32());
+            assert_eq!(StdHasher::finish(&got32), StdHasher::finish(&expected32));
+            assert_eq!(got32.total_len(), message.len() as u64);
+
+            let mut expected64 = XxHash64::with_seed(0xdead_cafe_beef_f00d);
+            let mut got64 = GpuXxHash64::with_seed(0xdead_cafe_beef_f00d)?;
+            write_chunks(
+                |chunk| {
+                    StdHasher::write(&mut expected64, chunk);
+                    got64.write(chunk);
+                },
+                &message,
+            );
+            assert_eq!(got64.finish_64()?, StdHasher::finish(&expected64));
+            assert_eq!(StdHasher::finish(&got64), StdHasher::finish(&expected64));
+            assert_eq!(got64.total_len(), message.len() as u64);
+
+            let mut expected3_64 = XxHash3_64::with_seed(0x1234_5678_9abc_def0);
+            let mut got3_64 = GpuXxHash3_64::with_seed(0x1234_5678_9abc_def0)?;
+            write_chunks(
+                |chunk| {
+                    StdHasher::write(&mut expected3_64, chunk);
+                    got3_64.write(chunk);
+                },
+                &message,
+            );
+            assert_eq!(got3_64.finish_64()?, StdHasher::finish(&expected3_64));
+            assert_eq!(
+                StdHasher::finish(&got3_64),
+                StdHasher::finish(&expected3_64)
+            );
+            assert_eq!(got3_64.total_len(), message.len() as u64);
+
+            let secret = custom_secret(257);
+            let mut expected3_128 =
+                XxHash3_128::with_seed_and_secret(0x1234_5678_9abc_def0, secret.clone()).unwrap();
+            let mut got3_128 = GpuXxHash3_128::with_seed_and_secret(0x1234_5678_9abc_def0, secret)?;
+            write_chunks(
+                |chunk| {
+                    expected3_128.write(chunk);
+                    got3_128.write(chunk);
+                },
+                &message,
+            );
+            assert_eq!(got3_128.finish_128()?, expected3_128.finish_128());
+            assert_eq!(got3_128.total_len(), message.len() as u64);
+
+            let mut expected_sha = Sha256::new();
+            let mut got_sha = GpuSha256::new()?;
+            write_chunks(
+                |chunk| {
+                    expected_sha.update(chunk);
+                    got_sha.write(chunk);
+                },
+                &message,
+            );
+            let expected_digest: [u8; 32] = expected_sha.finalize().into();
+            assert_eq!(got_sha.finalize()?, expected_digest);
+            assert_eq!(got_sha.total_len(), message.len() as u64);
+        }
+
         Ok(())
     }
 
@@ -662,6 +1241,28 @@ mod tests {
             let expected: Vec<_> = messages
                 .iter()
                 .map(|message| XxHash3_128::oneshot_with_secret(&secret, message).unwrap())
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_xxhash3_64_with_seed_and_secret_matches_twox_hash(seed in any::<u64>(), secret in fuzz_secret(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash3_64_with_seed_and_secret(seed, &secret, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot_with_seed_and_secret(seed, &secret, message).unwrap())
+                .collect();
+            prop_assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn fuzz_xxhash3_128_with_seed_and_secret_matches_twox_hash(seed in any::<u64>(), secret in fuzz_secret(), messages in fuzz_messages()) {
+            let gpu = GpuHash::new().unwrap();
+            let got = gpu.xxhash3_128_with_seed_and_secret(seed, &secret, &messages).unwrap();
+            let expected: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_128::oneshot_with_seed_and_secret(seed, &secret, message).unwrap())
                 .collect();
             prop_assert_eq!(got, expected);
         }

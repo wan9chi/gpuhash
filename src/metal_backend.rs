@@ -11,6 +11,7 @@ const MESSAGE_ALIGN: usize = 8;
 const XXH3_SECRET_MINIMUM_LENGTH: usize = 136;
 const XXH3_SECRET_DERIVED_FOR_LARGE: u32 = 0;
 const XXH3_SECRET_CUSTOM_FOR_ALL: u32 = 1;
+const XXH3_SECRET_CUSTOM_FOR_LARGE: u32 = 2;
 const XXH3_DEFAULT_SECRET: [u8; 192] = [
     0xb8, 0xfe, 0x6c, 0x39, 0x23, 0xa4, 0x4b, 0xbe, 0x7c, 0x01, 0x81, 0x2c, 0xf7, 0x21, 0xad, 0x1c,
     0xde, 0xd4, 0x6d, 0xe9, 0x83, 0x90, 0x97, 0xdb, 0x72, 0x40, 0xa4, 0xa4, 0xb7, 0xb3, 0x67, 0x1f,
@@ -274,6 +275,16 @@ impl GpuHash {
         self.xxhash3_64_with_secret_mode(0, batch, secret, XXH3_SECRET_CUSTOM_FOR_ALL)
     }
 
+    pub fn xxhash3_64_with_seed_and_secret(
+        &self,
+        seed: u64,
+        secret: &[u8],
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u64>> {
+        validate_xxh3_secret(secret)?;
+        self.xxhash3_64_with_secret_mode(seed, batch, secret, XXH3_SECRET_CUSTOM_FOR_LARGE)
+    }
+
     fn xxhash3_64_with_secret_mode(
         &self,
         seed: u64,
@@ -321,6 +332,16 @@ impl GpuHash {
     ) -> Result<Vec<u128>> {
         validate_xxh3_secret(secret)?;
         self.xxhash3_128_with_secret_mode(0, batch, secret, XXH3_SECRET_CUSTOM_FOR_ALL)
+    }
+
+    pub fn xxhash3_128_with_seed_and_secret(
+        &self,
+        seed: u64,
+        secret: &[u8],
+        batch: &PreparedBatch,
+    ) -> Result<Vec<u128>> {
+        validate_xxh3_secret(secret)?;
+        self.xxhash3_128_with_secret_mode(seed, batch, secret, XXH3_SECRET_CUSTOM_FOR_LARGE)
     }
 
     fn xxhash3_128_with_secret_mode(
