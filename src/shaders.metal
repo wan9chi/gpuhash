@@ -1024,6 +1024,81 @@ inline void sha256_round(thread uint &a,
     a = t1 + t2;
 }
 
+inline void sha256_compress(thread uint *w,
+                            thread uint &h0,
+                            thread uint &h1,
+                            thread uint &h2,
+                            thread uint &h3,
+                            thread uint &h4,
+                            thread uint &h5,
+                            thread uint &h6,
+                            thread uint &h7) {
+    uint a = h0;
+    uint b = h1;
+    uint c = h2;
+    uint d = h3;
+    uint e = h4;
+    uint f = h5;
+    uint g = h6;
+    uint h = h7;
+
+    for (uint i = 0; i < 16; i++) {
+        sha256_round(a, b, c, d, e, f, g, h, SHA256_K[i], w[i]);
+    }
+
+    for (uint i = 16; i < 64; i++) {
+        uint slot = i & 15;
+        uint word = sha256_small_sigma1(w[(i + 14) & 15]) + w[(i + 9) & 15]
+            + sha256_small_sigma0(w[(i + 1) & 15]) + w[slot];
+        w[slot] = word;
+        sha256_round(a, b, c, d, e, f, g, h, SHA256_K[i], word);
+    }
+
+    h0 += a;
+    h1 += b;
+    h2 += c;
+    h3 += d;
+    h4 += e;
+    h5 += f;
+    h6 += g;
+    h7 += h;
+}
+
+inline void sha256_compress_data_block(device const uchar *data,
+                                       thread uint &h0,
+                                       thread uint &h1,
+                                       thread uint &h2,
+                                       thread uint &h3,
+                                       thread uint &h4,
+                                       thread uint &h5,
+                                       thread uint &h6,
+                                       thread uint &h7) {
+    uint w[16];
+    for (uint i = 0; i < 16; i++) {
+        w[i] = read_be32(data + (ulong)i * 4);
+    }
+    sha256_compress(w, h0, h1, h2, h3, h4, h5, h6, h7);
+}
+
+inline void sha256_compress_padded_block(device const uchar *data,
+                                         ulong len,
+                                         ulong padded_len,
+                                         ulong block,
+                                         thread uint &h0,
+                                         thread uint &h1,
+                                         thread uint &h2,
+                                         thread uint &h3,
+                                         thread uint &h4,
+                                         thread uint &h5,
+                                         thread uint &h6,
+                                         thread uint &h7) {
+    uint w[16];
+    for (uint i = 0; i < 16; i++) {
+        w[i] = sha256_padded_word(data, len, padded_len, block + (ulong)i * 4);
+    }
+    sha256_compress(w, h0, h1, h2, h3, h4, h5, h6, h7);
+}
+
 inline void sha256_one(device const uchar *data, ulong len, device uchar *digest) {
     uint h0 = 0x6a09e667U;
     uint h1 = 0xbb67ae85U;
@@ -1034,43 +1109,15 @@ inline void sha256_one(device const uchar *data, ulong len, device uchar *digest
     uint h6 = 0x1f83d9abU;
     uint h7 = 0x5be0cd19U;
 
+    ulong full_len = len & ~63UL;
     ulong padded_len = ((len + 9 + 63) / 64) * 64;
 
-    for (ulong block = 0; block < padded_len; block += 64) {
-        uint w[16];
-        for (uint i = 0; i < 16; i++) {
-            w[i] = sha256_padded_word(data, len, padded_len, block + (ulong)i * 4);
-        }
+    for (ulong block = 0; block < full_len; block += 64) {
+        sha256_compress_data_block(data + block, h0, h1, h2, h3, h4, h5, h6, h7);
+    }
 
-        uint a = h0;
-        uint b = h1;
-        uint c = h2;
-        uint d = h3;
-        uint e = h4;
-        uint f = h5;
-        uint g = h6;
-        uint h = h7;
-
-        for (uint i = 0; i < 16; i++) {
-            sha256_round(a, b, c, d, e, f, g, h, SHA256_K[i], w[i]);
-        }
-
-        for (uint i = 16; i < 64; i++) {
-            uint slot = i & 15;
-            uint word = sha256_small_sigma1(w[(i + 14) & 15]) + w[(i + 9) & 15]
-                + sha256_small_sigma0(w[(i + 1) & 15]) + w[slot];
-            w[slot] = word;
-            sha256_round(a, b, c, d, e, f, g, h, SHA256_K[i], word);
-        }
-
-        h0 += a;
-        h1 += b;
-        h2 += c;
-        h3 += d;
-        h4 += e;
-        h5 += f;
-        h6 += g;
-        h7 += h;
+    for (ulong block = full_len; block < padded_len; block += 64) {
+        sha256_compress_padded_block(data, len, padded_len, block, h0, h1, h2, h3, h4, h5, h6, h7);
     }
 
     sha256_store_be32(digest + 0, h0);
