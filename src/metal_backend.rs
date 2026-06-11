@@ -210,12 +210,12 @@ impl GpuHash {
     }
 
     pub fn xxhash32(&self, seed: u32, batch: &PreparedBatch) -> Result<Vec<u32>> {
-        let mut output = vec![0u32; batch.count];
+        let mut output = Vec::with_capacity(batch.count);
         if batch.count == 0 {
             return Ok(output);
         }
 
-        let out_buffer = self.output_buffer(&mut output);
+        let out_buffer = self.output_buffer(&mut output, batch.count);
         let config = XxHash32Config {
             seed,
             count: batch.count as u32,
@@ -234,16 +234,19 @@ impl GpuHash {
             encoder.set_buffer(3, Some(&config_buffer), 0);
         })?;
 
+        unsafe {
+            output.set_len(batch.count);
+        }
         Ok(output)
     }
 
     pub fn xxhash64(&self, seed: u64, batch: &PreparedBatch) -> Result<Vec<u64>> {
-        let mut output = vec![0u64; batch.count];
+        let mut output = Vec::with_capacity(batch.count);
         if batch.count == 0 {
             return Ok(output);
         }
 
-        let out_buffer = self.output_buffer(&mut output);
+        let out_buffer = self.output_buffer(&mut output, batch.count);
         let config = XxHash64Config {
             seed,
             count: batch.count as u32,
@@ -262,6 +265,9 @@ impl GpuHash {
             encoder.set_buffer(3, Some(&config_buffer), 0);
         })?;
 
+        unsafe {
+            output.set_len(batch.count);
+        }
         Ok(output)
     }
 
@@ -292,7 +298,7 @@ impl GpuHash {
         secret: &[u8],
         secret_mode: u32,
     ) -> Result<Vec<u64>> {
-        let mut output = vec![0u64; batch.count];
+        let mut output = Vec::with_capacity(batch.count);
         if batch.count == 0 {
             return Ok(output);
         }
@@ -300,7 +306,7 @@ impl GpuHash {
             return Err(GpuHashError::InputTooLarge);
         }
 
-        let out_buffer = self.output_buffer(&mut output);
+        let out_buffer = self.output_buffer(&mut output, batch.count);
         let config_buffer =
             self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
         let secret_buffer = self.device.new_buffer_with_data(
@@ -317,6 +323,9 @@ impl GpuHash {
             encoder.set_buffer(4, Some(&secret_buffer), 0);
         })?;
 
+        unsafe {
+            output.set_len(batch.count);
+        }
         Ok(output)
     }
 
@@ -351,7 +360,7 @@ impl GpuHash {
         secret: &[u8],
         secret_mode: u32,
     ) -> Result<Vec<u128>> {
-        let mut output = vec![0u128; batch.count];
+        let mut output = Vec::with_capacity(batch.count);
         if batch.count == 0 {
             return Ok(output);
         }
@@ -359,7 +368,7 @@ impl GpuHash {
             return Err(GpuHashError::InputTooLarge);
         }
 
-        let out_buffer = self.output_buffer(&mut output);
+        let out_buffer = self.output_buffer(&mut output, batch.count);
         let config_buffer =
             self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
         let secret_buffer = self.device.new_buffer_with_data(
@@ -376,16 +385,19 @@ impl GpuHash {
             encoder.set_buffer(4, Some(&secret_buffer), 0);
         })?;
 
+        unsafe {
+            output.set_len(batch.count);
+        }
         Ok(output)
     }
 
     pub fn sha256(&self, batch: &PreparedBatch) -> Result<Vec<[u8; 32]>> {
-        let mut output = vec![[0u8; 32]; batch.count];
+        let mut output = Vec::with_capacity(batch.count);
         if batch.count == 0 {
             return Ok(output);
         }
 
-        let out_buffer = self.output_buffer(&mut output);
+        let out_buffer = self.output_buffer(&mut output, batch.count);
         let config = Sha256Config {
             count: batch.count as u32,
             _pad: [0; 3],
@@ -403,13 +415,18 @@ impl GpuHash {
             encoder.set_buffer(3, Some(&config_buffer), 0);
         })?;
 
+        unsafe {
+            output.set_len(batch.count);
+        }
         Ok(output)
     }
 
-    fn output_buffer<T>(&self, output: &mut Vec<T>) -> Buffer {
+    fn output_buffer<T: Copy>(&self, output: &mut Vec<T>, len: usize) -> Buffer {
+        debug_assert!(output.capacity() >= len);
+        // The GPU writes every element before callers set the Vec length.
         self.device.new_buffer_with_bytes_no_copy(
             output.as_mut_ptr().cast(),
-            mem::size_of_val(output.as_slice()) as u64,
+            (len * mem::size_of::<T>()) as u64,
             MTLResourceOptions::StorageModeShared,
             None,
         )

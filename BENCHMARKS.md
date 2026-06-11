@@ -28,6 +28,8 @@ Benchmark batch:
 - GPU data path uses `PreparedBatch` shared Metal buffers
 - GPU output buffers wrap the returned Rust `Vec` allocation directly with
   `newBufferWithBytesNoCopy`
+- GPU result vectors skip CPU zero-fill and mark outputs initialized only after
+  the command buffer completes
 - XXH3 large-message accumulation uses aligned 64-bit loads for regular
   message and secret stripes
 - SHA-256 compresses full 64-byte data blocks directly and only uses padded
@@ -37,20 +39,20 @@ Criterion results:
 
 | Benchmark | Mean time | Throughput | Speedup |
 | --- | ---: | ---: | ---: |
-| `twox_hash_xxhash32_cpu` | 65.244 ms | 7.6636 GiB/s | 1.0x |
-| `gpuhash_xxhash32_prepared` | 3.1044 ms | 161.06 GiB/s | 21.02x |
-| `twox_hash_xxhash64_cpu` | 20.310 ms | 24.618 GiB/s | 1.0x |
-| `gpuhash_xxhash64_prepared` | 3.0536 ms | 163.74 GiB/s | 6.65x |
-| `twox_hash_xxhash3_64_cpu` | 10.879 ms | 45.961 GiB/s | 1.0x |
-| `gpuhash_xxhash3_64_prepared` | 3.0647 ms | 163.15 GiB/s | 3.55x |
-| `twox_hash_xxhash3_128_cpu` | 11.297 ms | 44.259 GiB/s | 1.0x |
-| `gpuhash_xxhash3_128_prepared` | 3.0942 ms | 161.59 GiB/s | 3.65x |
-| `twox_hash_xxhash3_64_secret_cpu` | 11.318 ms | 44.176 GiB/s | 1.0x |
-| `gpuhash_xxhash3_64_secret_prepared` | 3.0731 ms | 162.70 GiB/s | 3.68x |
-| `twox_hash_xxhash3_128_secret_cpu` | 11.403 ms | 43.847 GiB/s | 1.0x |
-| `gpuhash_xxhash3_128_secret_prepared` | 3.1257 ms | 159.96 GiB/s | 3.65x |
-| `rustcrypto_sha256_cpu` | 165.36 ms | 3.0236 GiB/s | 1.0x |
-| `gpuhash_sha256_prepared` | 9.4080 ms | 53.146 GiB/s | 17.58x |
+| `twox_hash_xxhash32_cpu` | 66.105 ms | 7.5638 GiB/s | 1.0x |
+| `gpuhash_xxhash32_prepared` | 3.0513 ms | 163.87 GiB/s | 21.66x |
+| `twox_hash_xxhash64_cpu` | 20.363 ms | 24.554 GiB/s | 1.0x |
+| `gpuhash_xxhash64_prepared` | 3.0380 ms | 164.58 GiB/s | 6.70x |
+| `twox_hash_xxhash3_64_cpu` | 10.869 ms | 46.002 GiB/s | 1.0x |
+| `gpuhash_xxhash3_64_prepared` | 3.0494 ms | 163.97 GiB/s | 3.56x |
+| `twox_hash_xxhash3_128_cpu` | 11.314 ms | 44.193 GiB/s | 1.0x |
+| `gpuhash_xxhash3_128_prepared` | 3.0709 ms | 162.82 GiB/s | 3.68x |
+| `twox_hash_xxhash3_64_secret_cpu` | 11.310 ms | 44.207 GiB/s | 1.0x |
+| `gpuhash_xxhash3_64_secret_prepared` | 3.0514 ms | 163.86 GiB/s | 3.71x |
+| `twox_hash_xxhash3_128_secret_cpu` | 11.468 ms | 43.600 GiB/s | 1.0x |
+| `gpuhash_xxhash3_128_secret_prepared` | 3.0983 ms | 161.38 GiB/s | 3.70x |
+| `rustcrypto_sha256_cpu` | 165.14 ms | 3.0277 GiB/s | 1.0x |
+| `gpuhash_sha256_prepared` | 9.3247 ms | 53.621 GiB/s | 17.71x |
 
 The quick benchmark is useful for a one-shot sanity check:
 
