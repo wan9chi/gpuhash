@@ -40,8 +40,8 @@ The Apple Silicon benchmark job runs in
 [GitHub Actions](https://github.com/wan9chi/gpuhash/actions/workflows/ci.yml?query=branch%3Amain);
 each run uploads the Criterion report as a `criterion-report` artifact.
 Example successful benchmark job:
-[run 27379358286 / job 80911929636](https://github.com/wan9chi/gpuhash/actions/runs/27379358286/job/80911929636),
-with `criterion-report` artifact id `7577691995`.
+[run 27380736769 / job 80916683715](https://github.com/wan9chi/gpuhash/actions/runs/27380736769/job/80916683715),
+with `criterion-report` artifact id `7578233922`.
 
 ## Run
 
