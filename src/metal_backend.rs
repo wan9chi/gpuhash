@@ -4,7 +4,7 @@ use metal::{
     MTLResourceOptions, MTLSize, NSUInteger,
 };
 use objc::rc::autoreleasepool;
-use std::{mem, ptr, slice};
+use std::{mem, ptr};
 
 const SHADERS: &str = include_str!("shaders.metal");
 const MESSAGE_ALIGN: usize = 8;
@@ -214,10 +214,7 @@ impl GpuHash {
             return Ok(output);
         }
 
-        let out_buffer = self.device.new_buffer(
-            (batch.count * mem::size_of::<u32>()) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let out_buffer = self.output_buffer(&mut output);
         let config = XxHash32Config {
             seed,
             count: batch.count as u32,
@@ -236,11 +233,6 @@ impl GpuHash {
             encoder.set_buffer(3, Some(&config_buffer), 0);
         })?;
 
-        unsafe {
-            let src = slice::from_raw_parts(out_buffer.contents().cast::<u32>(), batch.count);
-            output.copy_from_slice(src);
-        }
-
         Ok(output)
     }
 
@@ -250,10 +242,7 @@ impl GpuHash {
             return Ok(output);
         }
 
-        let out_buffer = self.device.new_buffer(
-            (batch.count * mem::size_of::<u64>()) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let out_buffer = self.output_buffer(&mut output);
         let config = XxHash64Config {
             seed,
             count: batch.count as u32,
@@ -271,11 +260,6 @@ impl GpuHash {
             encoder.set_buffer(2, Some(&out_buffer), 0);
             encoder.set_buffer(3, Some(&config_buffer), 0);
         })?;
-
-        unsafe {
-            let src = slice::from_raw_parts(out_buffer.contents().cast::<u64>(), batch.count);
-            output.copy_from_slice(src);
-        }
 
         Ok(output)
     }
@@ -305,10 +289,7 @@ impl GpuHash {
             return Err(GpuHashError::InputTooLarge);
         }
 
-        let out_buffer = self.device.new_buffer(
-            (batch.count * mem::size_of::<u64>()) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let out_buffer = self.output_buffer(&mut output);
         let config_buffer =
             self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
         let secret_buffer = self.device.new_buffer_with_data(
@@ -324,11 +305,6 @@ impl GpuHash {
             encoder.set_buffer(3, Some(&config_buffer), 0);
             encoder.set_buffer(4, Some(&secret_buffer), 0);
         })?;
-
-        unsafe {
-            let src = slice::from_raw_parts(out_buffer.contents().cast::<u64>(), batch.count);
-            output.copy_from_slice(src);
-        }
 
         Ok(output)
     }
@@ -362,10 +338,7 @@ impl GpuHash {
             return Err(GpuHashError::InputTooLarge);
         }
 
-        let out_buffer = self.device.new_buffer(
-            (batch.count * mem::size_of::<[u64; 2]>()) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let out_buffer = self.output_buffer(&mut output);
         let config_buffer =
             self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
         let secret_buffer = self.device.new_buffer_with_data(
@@ -382,13 +355,6 @@ impl GpuHash {
             encoder.set_buffer(4, Some(&secret_buffer), 0);
         })?;
 
-        unsafe {
-            let src = slice::from_raw_parts(out_buffer.contents().cast::<[u64; 2]>(), batch.count);
-            for (dst, [low, high]) in output.iter_mut().zip(src.iter().copied()) {
-                *dst = ((high as u128) << 64) | (low as u128);
-            }
-        }
-
         Ok(output)
     }
 
@@ -398,10 +364,7 @@ impl GpuHash {
             return Ok(output);
         }
 
-        let out_buffer = self.device.new_buffer(
-            (batch.count * 32) as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let out_buffer = self.output_buffer(&mut output);
         let config = Sha256Config {
             count: batch.count as u32,
             _pad: [0; 3],
@@ -419,12 +382,16 @@ impl GpuHash {
             encoder.set_buffer(3, Some(&config_buffer), 0);
         })?;
 
-        unsafe {
-            let src = slice::from_raw_parts(out_buffer.contents().cast::<[u8; 32]>(), batch.count);
-            output.copy_from_slice(src);
-        }
-
         Ok(output)
+    }
+
+    fn output_buffer<T>(&self, output: &mut Vec<T>) -> Buffer {
+        self.device.new_buffer_with_bytes_no_copy(
+            output.as_mut_ptr().cast(),
+            mem::size_of_val(output.as_slice()) as u64,
+            MTLResourceOptions::StorageModeShared,
+            None,
+        )
     }
 
     fn xxhash3_config_buffer(
