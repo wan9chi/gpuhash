@@ -84,11 +84,15 @@ inline uint read_le32(device const uchar *ptr) {
     return *reinterpret_cast<device const uint *>(ptr);
 }
 
+inline uint byte_swap32(uint value) {
+    return ((value & 0x000000ffU) << 24)
+        | ((value & 0x0000ff00U) << 8)
+        | ((value & 0x00ff0000U) >> 8)
+        | ((value & 0xff000000U) >> 24);
+}
+
 inline uint read_be32(device const uchar *ptr) {
-    return ((uint)ptr[0] << 24)
-        | ((uint)ptr[1] << 16)
-        | ((uint)ptr[2] << 8)
-        | (uint)ptr[3];
+    return byte_swap32(read_le32(ptr));
 }
 
 inline uint xxh32_round(uint acc, uint input) {
@@ -268,10 +272,7 @@ inline U128Value make_u128(ulong low, ulong high) {
 }
 
 inline uint bswap32(uint value) {
-    return ((value & 0x000000ffU) << 24)
-        | ((value & 0x0000ff00U) << 8)
-        | ((value & 0x00ff0000U) >> 8)
-        | ((value & 0xff000000U) >> 24);
+    return byte_swap32(value);
 }
 
 inline ulong bswap64(ulong value) {

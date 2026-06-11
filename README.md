@@ -26,13 +26,13 @@ On an Apple M5 Pro with a prepared 512 MiB batch, Criterion reports:
 
 | Algorithm | CPU baseline | GPU prepared | Speedup |
 | --- | ---: | ---: | ---: |
-| `twox-hash` XXH32 | 67.650 ms | 3.0395 ms | 22.26x |
-| `twox-hash` XXH64 | 20.650 ms | 3.0652 ms | 6.74x |
-| `twox-hash` XXH3-64 | 11.197 ms | 3.2339 ms | 3.46x |
-| `twox-hash` XXH3-128 | 11.687 ms | 3.2698 ms | 3.57x |
-| `twox-hash` XXH3-64 custom secret | 11.500 ms | 3.2626 ms | 3.52x |
-| `twox-hash` XXH3-128 custom secret | 12.271 ms | 3.2812 ms | 3.74x |
-| RustCrypto SHA-256 | 165.19 ms | 9.7215 ms | 16.99x |
+| `twox-hash` XXH32 | 65.790 ms | 3.0440 ms | 21.61x |
+| `twox-hash` XXH64 | 20.512 ms | 3.0477 ms | 6.73x |
+| `twox-hash` XXH3-64 | 10.914 ms | 3.2268 ms | 3.38x |
+| `twox-hash` XXH3-128 | 11.441 ms | 3.2527 ms | 3.52x |
+| `twox-hash` XXH3-64 custom secret | 11.378 ms | 3.2343 ms | 3.52x |
+| `twox-hash` XXH3-128 custom secret | 11.739 ms | 3.2502 ms | 3.61x |
+| RustCrypto SHA-256 | 165.10 ms | 9.3139 ms | 17.73x |
 
 See [BENCHMARKS.md](BENCHMARKS.md) for the full command and throughput table.
 The Apple Silicon benchmark job runs in
