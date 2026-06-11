@@ -29,7 +29,34 @@ struct XxHash3Config {
 
 struct Sha256Config {
     uint count;
-    uint3 _pad;
+    uint _pad;
+    ulong len;
+    ulong stride;
+};
+
+struct UniformXxHash32Config {
+    uint seed;
+    uint count;
+    ulong len;
+    ulong stride;
+};
+
+struct UniformXxHash64Config {
+    ulong seed;
+    uint count;
+    uint _pad;
+    ulong len;
+    ulong stride;
+};
+
+struct UniformXxHash3Config {
+    ulong seed;
+    uint count;
+    uint secret_mode;
+    uint secret_len;
+    uint _pad;
+    ulong len;
+    ulong stride;
 };
 
 constant uint XXH32_PRIME1 = 0x9E3779B1U;
@@ -168,6 +195,17 @@ kernel void xxhash32_batch(device const uchar *input [[buffer(0)]],
     output[gid] = xxhash32_one(input + desc.offset, desc.len, config.seed);
 }
 
+kernel void xxhash32_uniform_batch(device const uchar *input [[buffer(0)]],
+                                   device uint *output [[buffer(1)]],
+                                   constant UniformXxHash32Config &config [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+    if (gid >= config.count) {
+        return;
+    }
+
+    output[gid] = xxhash32_one(input + (ulong)gid * config.stride, config.len, config.seed);
+}
+
 inline ulong xxh64_round(ulong acc, ulong input) {
     acc += input * XXH64_PRIME2;
     acc = rotl64(acc, 31);
@@ -257,6 +295,17 @@ kernel void xxhash64_batch(device const uchar *input [[buffer(0)]],
 
     MessageDesc desc = descs[gid];
     output[gid] = xxhash64_one(input + desc.offset, desc.len, config.seed);
+}
+
+kernel void xxhash64_uniform_batch(device const uchar *input [[buffer(0)]],
+                                   device ulong *output [[buffer(1)]],
+                                   constant UniformXxHash64Config &config [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+    if (gid >= config.count) {
+        return;
+    }
+
+    output[gid] = xxhash64_one(input + (ulong)gid * config.stride, config.len, config.seed);
 }
 
 struct U128Value {
@@ -920,6 +969,25 @@ kernel void xxhash3_64_batch(device const uchar *input [[buffer(0)]],
     );
 }
 
+kernel void xxhash3_64_uniform_batch(device const uchar *input [[buffer(0)]],
+                                     device ulong *output [[buffer(1)]],
+                                     constant UniformXxHash3Config &config [[buffer(2)]],
+                                     device const uchar *secret [[buffer(3)]],
+                                     uint gid [[thread_position_in_grid]]) {
+    if (gid >= config.count) {
+        return;
+    }
+
+    output[gid] = xxhash3_64_one(
+        input + (ulong)gid * config.stride,
+        config.len,
+        config.seed,
+        secret,
+        config.secret_mode,
+        (ulong)config.secret_len
+    );
+}
+
 kernel void xxhash3_128_batch(device const uchar *input [[buffer(0)]],
                               device const MessageDesc *descs [[buffer(1)]],
                               device ulong2 *output [[buffer(2)]],
@@ -934,6 +1002,26 @@ kernel void xxhash3_128_batch(device const uchar *input [[buffer(0)]],
     U128Value hash = xxhash3_128_one(
         input + desc.offset,
         desc.len,
+        config.seed,
+        secret,
+        config.secret_mode,
+        (ulong)config.secret_len
+    );
+    output[gid] = ulong2(hash.low, hash.high);
+}
+
+kernel void xxhash3_128_uniform_batch(device const uchar *input [[buffer(0)]],
+                                      device ulong2 *output [[buffer(1)]],
+                                      constant UniformXxHash3Config &config [[buffer(2)]],
+                                      device const uchar *secret [[buffer(3)]],
+                                      uint gid [[thread_position_in_grid]]) {
+    if (gid >= config.count) {
+        return;
+    }
+
+    U128Value hash = xxhash3_128_one(
+        input + (ulong)gid * config.stride,
+        config.len,
         config.seed,
         secret,
         config.secret_mode,
@@ -1162,4 +1250,15 @@ kernel void sha256_batch(device const uchar *input [[buffer(0)]],
 
     MessageDesc desc = descs[gid];
     sha256_one(input + desc.offset, desc.len, output + (ulong)gid * 32);
+}
+
+kernel void sha256_uniform_batch(device const uchar *input [[buffer(0)]],
+                                 device uchar *output [[buffer(1)]],
+                                 constant Sha256Config &config [[buffer(2)]],
+                                 uint gid [[thread_position_in_grid]]) {
+    if (gid >= config.count) {
+        return;
+    }
+
+    sha256_one(input + (ulong)gid * config.stride, config.len, output + (ulong)gid * 32);
 }

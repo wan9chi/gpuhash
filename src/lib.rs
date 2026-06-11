@@ -1206,6 +1206,87 @@ mod tests {
     }
 
     #[test]
+    fn uniform_prepared_batches_match_references() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let seed = 0x1234_5678_9abc_def0;
+        let secret = custom_secret(257);
+
+        for len in [0usize, 1, 7, 8, 31, 64, 241, 1024, 4096] {
+            let messages: Vec<Vec<u8>> = (0..6)
+                .map(|message_idx| {
+                    (0..len)
+                        .map(|byte_idx| {
+                            (message_idx as u8)
+                                .wrapping_mul(31)
+                                .wrapping_add(byte_idx as u8)
+                                .rotate_left((byte_idx & 7) as u32)
+                        })
+                        .collect()
+                })
+                .collect();
+            let batch = gpu.prepare_batch(&messages)?;
+            assert_eq!(batch.len(), messages.len());
+            assert_eq!(batch.total_bytes(), messages.len() * len);
+
+            let expected32: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash32::oneshot(seed as u32, message))
+                .collect();
+            assert_eq!(gpu.xxhash32_prepared(seed as u32, &batch)?, expected32);
+
+            let expected64: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash64::oneshot(seed, message))
+                .collect();
+            assert_eq!(gpu.xxhash64_prepared(seed, &batch)?, expected64);
+
+            let expected3_64: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot_with_seed(seed, message))
+                .collect();
+            assert_eq!(
+                gpu.xxhash3_64_with_seed_prepared(seed, &batch)?,
+                expected3_64
+            );
+
+            let expected3_128: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_128::oneshot_with_seed(seed, message))
+                .collect();
+            assert_eq!(
+                gpu.xxhash3_128_with_seed_prepared(seed, &batch)?,
+                expected3_128
+            );
+
+            let expected3_64_secret: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot_with_secret(&secret, message).unwrap())
+                .collect();
+            assert_eq!(
+                gpu.xxhash3_64_with_secret_prepared(&secret, &batch)?,
+                expected3_64_secret
+            );
+
+            let expected3_128_secret: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_128::oneshot_with_secret(&secret, message).unwrap())
+                .collect();
+            assert_eq!(
+                gpu.xxhash3_128_with_secret_prepared(&secret, &batch)?,
+                expected3_128_secret
+            );
+
+            let expected_sha: Vec<[u8; 32]> = messages
+                .iter()
+                .map(|message| Sha256::digest(message).into())
+                .collect();
+            assert_eq!(gpu.sha256_prepared(&batch)?, expected_sha);
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn prepared_batches_can_be_reused() -> Result<()> {
         let gpu = GpuHash::new()?;
         let messages = sample_messages();

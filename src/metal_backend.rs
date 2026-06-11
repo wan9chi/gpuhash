@@ -64,7 +64,46 @@ struct XxHash3Config {
 #[derive(Clone, Copy, Debug)]
 struct Sha256Config {
     count: u32,
-    _pad: [u32; 3],
+    _pad: u32,
+    len: u64,
+    stride: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct UniformXxHash32Config {
+    seed: u32,
+    count: u32,
+    len: u64,
+    stride: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct UniformXxHash64Config {
+    seed: u64,
+    count: u32,
+    _pad: u32,
+    len: u64,
+    stride: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct UniformXxHash3Config {
+    seed: u64,
+    count: u32,
+    secret_mode: u32,
+    secret_len: u32,
+    _pad: u32,
+    len: u64,
+    stride: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct UniformLayout {
+    len: usize,
+    stride: usize,
 }
 
 pub struct PreparedBatch {
@@ -72,6 +111,7 @@ pub struct PreparedBatch {
     descs: Buffer,
     count: usize,
     total_bytes: usize,
+    uniform: Option<UniformLayout>,
 }
 
 impl PreparedBatch {
@@ -88,10 +128,15 @@ pub struct GpuHash {
     device: Device,
     queue: CommandQueue,
     xxhash32_pipeline: ComputePipelineState,
+    xxhash32_uniform_pipeline: ComputePipelineState,
     xxhash64_pipeline: ComputePipelineState,
+    xxhash64_uniform_pipeline: ComputePipelineState,
     xxhash3_64_pipeline: ComputePipelineState,
+    xxhash3_64_uniform_pipeline: ComputePipelineState,
     xxhash3_128_pipeline: ComputePipelineState,
+    xxhash3_128_uniform_pipeline: ComputePipelineState,
     sha256_pipeline: ComputePipelineState,
+    sha256_uniform_pipeline: ComputePipelineState,
 }
 
 impl GpuHash {
@@ -109,43 +154,78 @@ impl GpuHash {
             let xxhash32_function = library
                 .get_function("xxhash32_batch", None)
                 .map_err(GpuHashError::Metal)?;
+            let xxhash32_uniform_function = library
+                .get_function("xxhash32_uniform_batch", None)
+                .map_err(GpuHashError::Metal)?;
             let xxhash64_function = library
                 .get_function("xxhash64_batch", None)
+                .map_err(GpuHashError::Metal)?;
+            let xxhash64_uniform_function = library
+                .get_function("xxhash64_uniform_batch", None)
                 .map_err(GpuHashError::Metal)?;
             let xxhash3_64_function = library
                 .get_function("xxhash3_64_batch", None)
                 .map_err(GpuHashError::Metal)?;
+            let xxhash3_64_uniform_function = library
+                .get_function("xxhash3_64_uniform_batch", None)
+                .map_err(GpuHashError::Metal)?;
             let xxhash3_128_function = library
                 .get_function("xxhash3_128_batch", None)
                 .map_err(GpuHashError::Metal)?;
+            let xxhash3_128_uniform_function = library
+                .get_function("xxhash3_128_uniform_batch", None)
+                .map_err(GpuHashError::Metal)?;
             let sha256_function = library
                 .get_function("sha256_batch", None)
+                .map_err(GpuHashError::Metal)?;
+            let sha256_uniform_function = library
+                .get_function("sha256_uniform_batch", None)
                 .map_err(GpuHashError::Metal)?;
 
             let xxhash32_pipeline = device
                 .new_compute_pipeline_state_with_function(&xxhash32_function)
                 .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
+            let xxhash32_uniform_pipeline = device
+                .new_compute_pipeline_state_with_function(&xxhash32_uniform_function)
+                .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
             let xxhash64_pipeline = device
                 .new_compute_pipeline_state_with_function(&xxhash64_function)
+                .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
+            let xxhash64_uniform_pipeline = device
+                .new_compute_pipeline_state_with_function(&xxhash64_uniform_function)
                 .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
             let xxhash3_64_pipeline = device
                 .new_compute_pipeline_state_with_function(&xxhash3_64_function)
                 .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
+            let xxhash3_64_uniform_pipeline = device
+                .new_compute_pipeline_state_with_function(&xxhash3_64_uniform_function)
+                .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
             let xxhash3_128_pipeline = device
                 .new_compute_pipeline_state_with_function(&xxhash3_128_function)
                 .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
+            let xxhash3_128_uniform_pipeline = device
+                .new_compute_pipeline_state_with_function(&xxhash3_128_uniform_function)
+                .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
             let sha256_pipeline = device
                 .new_compute_pipeline_state_with_function(&sha256_function)
+                .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
+            let sha256_uniform_pipeline = device
+                .new_compute_pipeline_state_with_function(&sha256_uniform_function)
                 .map_err(|err| GpuHashError::Metal(format!("{err:?}")))?;
 
             Ok(Self {
                 device,
                 queue,
                 xxhash32_pipeline,
+                xxhash32_uniform_pipeline,
                 xxhash64_pipeline,
+                xxhash64_uniform_pipeline,
                 xxhash3_64_pipeline,
+                xxhash3_64_uniform_pipeline,
                 xxhash3_128_pipeline,
+                xxhash3_128_uniform_pipeline,
                 sha256_pipeline,
+                sha256_uniform_pipeline,
             })
         })
     }
@@ -158,8 +238,12 @@ impl GpuHash {
 
         let mut total_bytes = 0usize;
         let mut padded_bytes = 0usize;
+        let mut uniform_len = messages.first().map(|message| message.as_ref().len());
         for message in messages {
             let len = message.as_ref().len();
+            if uniform_len.is_some_and(|first_len| first_len != len) {
+                uniform_len = None;
+            }
             total_bytes = total_bytes
                 .checked_add(len)
                 .ok_or(GpuHashError::InputTooLarge)?;
@@ -206,6 +290,10 @@ impl GpuHash {
             descs,
             count,
             total_bytes,
+            uniform: uniform_len.map(|len| UniformLayout {
+                len,
+                stride: align_up(len, MESSAGE_ALIGN),
+            }),
         })
     }
 
@@ -216,23 +304,33 @@ impl GpuHash {
         }
 
         let out_buffer = self.output_buffer(&mut output, batch.count);
-        let config = XxHash32Config {
-            seed,
-            count: batch.count as u32,
-            _pad: [0; 2],
-        };
-        let config_buffer = self.device.new_buffer_with_data(
-            (&config as *const XxHash32Config).cast(),
-            mem::size_of::<XxHash32Config>() as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-
-        self.dispatch(&self.xxhash32_pipeline, batch.count, |encoder| {
-            encoder.set_buffer(0, Some(&batch.input), 0);
-            encoder.set_buffer(1, Some(&batch.descs), 0);
-            encoder.set_buffer(2, Some(&out_buffer), 0);
-            encoder.set_buffer(3, Some(&config_buffer), 0);
-        })?;
+        if let Some(uniform) = batch.uniform {
+            let config = UniformXxHash32Config {
+                seed,
+                count: batch.count as u32,
+                len: uniform.len as u64,
+                stride: uniform.stride as u64,
+            };
+            let config_buffer = self.buffer_with_data(&config);
+            self.dispatch(&self.xxhash32_uniform_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&config_buffer), 0);
+            })?;
+        } else {
+            let config = XxHash32Config {
+                seed,
+                count: batch.count as u32,
+                _pad: [0; 2],
+            };
+            let config_buffer = self.buffer_with_data(&config);
+            self.dispatch(&self.xxhash32_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&batch.descs), 0);
+                encoder.set_buffer(2, Some(&out_buffer), 0);
+                encoder.set_buffer(3, Some(&config_buffer), 0);
+            })?;
+        }
 
         unsafe {
             output.set_len(batch.count);
@@ -252,18 +350,29 @@ impl GpuHash {
             count: batch.count as u32,
             _pad: 0,
         };
-        let config_buffer = self.device.new_buffer_with_data(
-            (&config as *const XxHash64Config).cast(),
-            mem::size_of::<XxHash64Config>() as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-
-        self.dispatch(&self.xxhash64_pipeline, batch.count, |encoder| {
-            encoder.set_buffer(0, Some(&batch.input), 0);
-            encoder.set_buffer(1, Some(&batch.descs), 0);
-            encoder.set_buffer(2, Some(&out_buffer), 0);
-            encoder.set_buffer(3, Some(&config_buffer), 0);
-        })?;
+        if let Some(uniform) = batch.uniform {
+            let config = UniformXxHash64Config {
+                seed,
+                count: batch.count as u32,
+                _pad: 0,
+                len: uniform.len as u64,
+                stride: uniform.stride as u64,
+            };
+            let config_buffer = self.buffer_with_data(&config);
+            self.dispatch(&self.xxhash64_uniform_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&config_buffer), 0);
+            })?;
+        } else {
+            let config_buffer = self.buffer_with_data(&config);
+            self.dispatch(&self.xxhash64_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&batch.descs), 0);
+                encoder.set_buffer(2, Some(&out_buffer), 0);
+                encoder.set_buffer(3, Some(&config_buffer), 0);
+            })?;
+        }
 
         unsafe {
             output.set_len(batch.count);
@@ -308,20 +417,29 @@ impl GpuHash {
 
         let out_buffer = self.output_buffer(&mut output, batch.count);
         let config_buffer =
-            self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
+            self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len(), batch.uniform);
         let secret_buffer = self.device.new_buffer_with_data(
             secret.as_ptr().cast(),
             secret.len() as u64,
             MTLResourceOptions::StorageModeShared,
         );
 
-        self.dispatch(&self.xxhash3_64_pipeline, batch.count, |encoder| {
-            encoder.set_buffer(0, Some(&batch.input), 0);
-            encoder.set_buffer(1, Some(&batch.descs), 0);
-            encoder.set_buffer(2, Some(&out_buffer), 0);
-            encoder.set_buffer(3, Some(&config_buffer), 0);
-            encoder.set_buffer(4, Some(&secret_buffer), 0);
-        })?;
+        if batch.uniform.is_some() {
+            self.dispatch(&self.xxhash3_64_uniform_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&config_buffer), 0);
+                encoder.set_buffer(3, Some(&secret_buffer), 0);
+            })?;
+        } else {
+            self.dispatch(&self.xxhash3_64_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&batch.descs), 0);
+                encoder.set_buffer(2, Some(&out_buffer), 0);
+                encoder.set_buffer(3, Some(&config_buffer), 0);
+                encoder.set_buffer(4, Some(&secret_buffer), 0);
+            })?;
+        }
 
         unsafe {
             output.set_len(batch.count);
@@ -370,20 +488,29 @@ impl GpuHash {
 
         let out_buffer = self.output_buffer(&mut output, batch.count);
         let config_buffer =
-            self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len());
+            self.xxhash3_config_buffer(seed, batch.count, secret_mode, secret.len(), batch.uniform);
         let secret_buffer = self.device.new_buffer_with_data(
             secret.as_ptr().cast(),
             secret.len() as u64,
             MTLResourceOptions::StorageModeShared,
         );
 
-        self.dispatch(&self.xxhash3_128_pipeline, batch.count, |encoder| {
-            encoder.set_buffer(0, Some(&batch.input), 0);
-            encoder.set_buffer(1, Some(&batch.descs), 0);
-            encoder.set_buffer(2, Some(&out_buffer), 0);
-            encoder.set_buffer(3, Some(&config_buffer), 0);
-            encoder.set_buffer(4, Some(&secret_buffer), 0);
-        })?;
+        if batch.uniform.is_some() {
+            self.dispatch(&self.xxhash3_128_uniform_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&config_buffer), 0);
+                encoder.set_buffer(3, Some(&secret_buffer), 0);
+            })?;
+        } else {
+            self.dispatch(&self.xxhash3_128_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&batch.descs), 0);
+                encoder.set_buffer(2, Some(&out_buffer), 0);
+                encoder.set_buffer(3, Some(&config_buffer), 0);
+                encoder.set_buffer(4, Some(&secret_buffer), 0);
+            })?;
+        }
 
         unsafe {
             output.set_len(batch.count);
@@ -398,22 +525,34 @@ impl GpuHash {
         }
 
         let out_buffer = self.output_buffer(&mut output, batch.count);
-        let config = Sha256Config {
-            count: batch.count as u32,
-            _pad: [0; 3],
-        };
-        let config_buffer = self.device.new_buffer_with_data(
-            (&config as *const Sha256Config).cast(),
-            mem::size_of::<Sha256Config>() as u64,
-            MTLResourceOptions::StorageModeShared,
-        );
-
-        self.dispatch(&self.sha256_pipeline, batch.count, |encoder| {
-            encoder.set_buffer(0, Some(&batch.input), 0);
-            encoder.set_buffer(1, Some(&batch.descs), 0);
-            encoder.set_buffer(2, Some(&out_buffer), 0);
-            encoder.set_buffer(3, Some(&config_buffer), 0);
-        })?;
+        if let Some(uniform) = batch.uniform {
+            let config = Sha256Config {
+                count: batch.count as u32,
+                _pad: 0,
+                len: uniform.len as u64,
+                stride: uniform.stride as u64,
+            };
+            let config_buffer = self.buffer_with_data(&config);
+            self.dispatch(&self.sha256_uniform_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&out_buffer), 0);
+                encoder.set_buffer(2, Some(&config_buffer), 0);
+            })?;
+        } else {
+            let config = Sha256Config {
+                count: batch.count as u32,
+                _pad: 0,
+                len: 0,
+                stride: 0,
+            };
+            let config_buffer = self.buffer_with_data(&config);
+            self.dispatch(&self.sha256_pipeline, batch.count, |encoder| {
+                encoder.set_buffer(0, Some(&batch.input), 0);
+                encoder.set_buffer(1, Some(&batch.descs), 0);
+                encoder.set_buffer(2, Some(&out_buffer), 0);
+                encoder.set_buffer(3, Some(&config_buffer), 0);
+            })?;
+        }
 
         unsafe {
             output.set_len(batch.count);
@@ -432,25 +571,43 @@ impl GpuHash {
         )
     }
 
+    fn buffer_with_data<T>(&self, value: &T) -> Buffer {
+        self.device.new_buffer_with_data(
+            (value as *const T).cast(),
+            mem::size_of::<T>() as u64,
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+
     fn xxhash3_config_buffer(
         &self,
         seed: u64,
         count: usize,
         secret_mode: u32,
         secret_len: usize,
+        uniform: Option<UniformLayout>,
     ) -> Buffer {
-        let config = XxHash3Config {
-            seed,
-            count: count as u32,
-            secret_mode,
-            secret_len: secret_len as u32,
-            _pad: 0,
-        };
-        self.device.new_buffer_with_data(
-            (&config as *const XxHash3Config).cast(),
-            mem::size_of::<XxHash3Config>() as u64,
-            MTLResourceOptions::StorageModeShared,
-        )
+        if let Some(uniform) = uniform {
+            let config = UniformXxHash3Config {
+                seed,
+                count: count as u32,
+                secret_mode,
+                secret_len: secret_len as u32,
+                _pad: 0,
+                len: uniform.len as u64,
+                stride: uniform.stride as u64,
+            };
+            self.buffer_with_data(&config)
+        } else {
+            let config = XxHash3Config {
+                seed,
+                count: count as u32,
+                secret_mode,
+                secret_len: secret_len as u32,
+                _pad: 0,
+            };
+            self.buffer_with_data(&config)
+        }
     }
 
     fn dispatch(
