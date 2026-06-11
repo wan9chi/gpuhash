@@ -15,7 +15,7 @@ cargo bench --bench hash_batch
 The same benchmark runs in the
 [GitHub Actions benchmark job](https://github.com/wan9chi/gpuhash/actions/workflows/ci.yml?query=branch%3Amain).
 Each run uploads the Criterion report as the `criterion-report` artifact.
-The latest verified run is
+A verified benchmark run is
 [CI #27371941256](https://github.com/wan9chi/gpuhash/actions/runs/27371941256);
 its benchmark output is in the
 [Benchmark on Apple Silicon job](https://github.com/wan9chi/gpuhash/actions/runs/27371941256/job/80886383482)
