@@ -531,10 +531,30 @@ inline void xxh3_large_accumulate(thread ulong acc[8],
     }
 }
 
+inline void xxh3_large_accumulate_aligned(thread ulong acc[8],
+                                          device const uchar *stripe,
+                                          device const uchar *secret) {
+    for (uint i = 0; i < 8; i++) {
+        ulong stripe_word = read_le64(stripe + (ulong)i * 8);
+        ulong secret_word = read_le64(secret + (ulong)i * 8);
+        ulong value = stripe_word ^ secret_word;
+        acc[i ^ 1] += stripe_word;
+        acc[i] += (value & 0xffffffffUL) * (value >> 32);
+    }
+}
+
 inline void xxh3_large_scramble(thread ulong acc[8], device const uchar *secret_end) {
     for (uint i = 0; i < 8; i++) {
         acc[i] ^= acc[i] >> 47;
         acc[i] ^= xxh3_derived_secret_u64(secret_end, (ulong)i * 8);
+        acc[i] *= (ulong)XXH32_PRIME1;
+    }
+}
+
+inline void xxh3_large_scramble_aligned(thread ulong acc[8], device const uchar *secret_end) {
+    for (uint i = 0; i < 8; i++) {
+        acc[i] ^= acc[i] >> 47;
+        acc[i] ^= read_le64(secret_end + (ulong)i * 8);
         acc[i] *= (ulong)XXH32_PRIME1;
     }
 }
@@ -550,7 +570,7 @@ inline void xxh3_large_last_round(thread ulong acc[8],
     ulong stripes = (last_block_len % 64 == 0) ? (full_stripes - 1) : full_stripes;
 
     for (ulong i = 0; i < stripes; i++) {
-        xxh3_large_accumulate(acc, data + last_block_offset + i * 64, secret + i * 8);
+        xxh3_large_accumulate_aligned(acc, data + last_block_offset + i * 64, secret + i * 8);
     }
 
     xxh3_large_accumulate(acc, data + len - 64, secret + secret_len - 71);
@@ -596,7 +616,7 @@ inline void xxh3_large_accumulators(device const uchar *data,
     for (ulong block = 0; block < blocks_to_process; block++) {
         ulong block_offset = block * block_size;
         for (ulong stripe = 0; stripe < stripes_per_block; stripe++) {
-            xxh3_large_accumulate(acc, data + block_offset + stripe * 64, secret + stripe * 8);
+            xxh3_large_accumulate_aligned(acc, data + block_offset + stripe * 64, secret + stripe * 8);
         }
         xxh3_large_scramble(acc, secret + secret_len - 64);
     }
@@ -612,7 +632,7 @@ inline void xxh3_large_last_round_default(thread ulong acc[8],
     ulong stripes = (last_block_len % 64 == 0) ? (full_stripes - 1) : full_stripes;
 
     for (ulong i = 0; i < stripes; i++) {
-        xxh3_large_accumulate(acc, data + last_block_offset + i * 64, secret + i * 8);
+        xxh3_large_accumulate_aligned(acc, data + last_block_offset + i * 64, secret + i * 8);
     }
 
     xxh3_large_accumulate(acc, data + len - 64, secret + 121);
@@ -642,9 +662,9 @@ inline void xxh3_large_accumulators_default(device const uchar *data,
     for (ulong block = 0; block < blocks_to_process; block++) {
         ulong block_offset = block * 1024;
         for (uint stripe = 0; stripe < 16; stripe++) {
-            xxh3_large_accumulate(acc, data + block_offset + (ulong)stripe * 64, secret + (ulong)stripe * 8);
+            xxh3_large_accumulate_aligned(acc, data + block_offset + (ulong)stripe * 64, secret + (ulong)stripe * 8);
         }
-        xxh3_large_scramble(acc, secret + 128);
+        xxh3_large_scramble_aligned(acc, secret + 128);
     }
 }
 
