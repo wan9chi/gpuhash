@@ -12,7 +12,8 @@ Apple Silicon GPU batch hashing for:
 - `XXH3-128`, compatible with `twox-hash::XxHash3_128::oneshot`,
   `oneshot_with_seed`, `oneshot_with_secret`, and
   `oneshot_with_seed_and_secret`
-- SHA-256, compatible with RustCrypto `sha2::Sha256`
+- SHA-256, compatible with RustCrypto `sha2::Sha256` and the
+  `digest::Digest` trait surface
 
 The crate uses Metal compute kernels and `StorageModeShared` buffers. On Apple
 Silicon that means CPU and GPU access the same unified-memory allocation; the

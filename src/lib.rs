@@ -781,8 +781,8 @@ pub struct GpuSha256 {
 }
 
 impl GpuSha256 {
-    /// Constructs a SHA-256 hasher.
-    pub fn new() -> Result<Self> {
+    /// Fallibly constructs a SHA-256 hasher.
+    pub fn try_new() -> Result<Self> {
         Ok(Self {
             engine: GpuHash::new()?,
             bytes: Vec::new(),
@@ -800,8 +800,8 @@ impl GpuSha256 {
         self.bytes.extend_from_slice(input);
     }
 
-    /// Finalizes the current byte stream as a SHA-256 digest.
-    pub fn finalize(&self) -> Result<[u8; 32]> {
+    /// Fallibly finalizes the current byte stream as a SHA-256 digest.
+    pub fn try_finalize(&self) -> Result<[u8; 32]> {
         let messages = [self.bytes.as_slice()];
         Ok(self.engine.sha256(&messages)?[0])
     }
@@ -809,9 +809,46 @@ impl GpuSha256 {
 
 impl Default for GpuSha256 {
     fn default() -> Self {
-        Self::new().expect("failed to create default GPU SHA-256 hasher")
+        Self::try_new().expect("failed to create default GPU SHA-256 hasher")
     }
 }
+
+impl digest::OutputSizeUser for GpuSha256 {
+    type OutputSize = digest::consts::U32;
+}
+
+impl digest::Update for GpuSha256 {
+    fn update(&mut self, data: &[u8]) {
+        self.write(data);
+    }
+}
+
+impl digest::FixedOutput for GpuSha256 {
+    fn finalize_into(self, out: &mut digest::Output<Self>) {
+        let digest = self
+            .try_finalize()
+            .expect("failed to finish GPU SHA-256 digest");
+        out.copy_from_slice(&digest);
+    }
+}
+
+impl digest::FixedOutputReset for GpuSha256 {
+    fn finalize_into_reset(&mut self, out: &mut digest::Output<Self>) {
+        let digest = self
+            .try_finalize()
+            .expect("failed to finish GPU SHA-256 digest");
+        out.copy_from_slice(&digest);
+        self.bytes.clear();
+    }
+}
+
+impl digest::Reset for GpuSha256 {
+    fn reset(&mut self) {
+        self.bytes.clear();
+    }
+}
+
+impl digest::HashMarker for GpuSha256 {}
 
 #[cfg(test)]
 mod tests {
@@ -1160,7 +1197,7 @@ mod tests {
             assert_eq!(got3_128.total_len(), message.len() as u64);
 
             let mut expected_sha = Sha256::new();
-            let mut got_sha = GpuSha256::new()?;
+            let mut got_sha = GpuSha256::try_new()?;
             write_chunks(
                 |chunk| {
                     expected_sha.update(chunk);
@@ -1169,11 +1206,35 @@ mod tests {
                 &message,
             );
             let expected_digest: [u8; 32] = expected_sha.finalize().into();
-            assert_eq!(got_sha.finalize()?, expected_digest);
+            assert_eq!(got_sha.try_finalize()?, expected_digest);
             assert_eq!(got_sha.total_len(), message.len() as u64);
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn gpu_sha256_implements_digest_traits() {
+        let mut hasher = GpuSha256::new();
+        hasher.update(b"abc");
+        let got: [u8; 32] = hasher.finalize().into();
+        let expected: [u8; 32] = Sha256::digest(b"abc").into();
+        assert_eq!(got, expected);
+
+        let got: [u8; 32] = GpuSha256::digest(b"message digest").into();
+        let expected: [u8; 32] = Sha256::digest(b"message digest").into();
+        assert_eq!(got, expected);
+
+        let mut hasher = GpuSha256::new();
+        hasher.update(b"first");
+        let first: [u8; 32] = hasher.finalize_reset().into();
+        let expected_first: [u8; 32] = Sha256::digest(b"first").into();
+        assert_eq!(first, expected_first);
+
+        hasher.update(b"second");
+        let second: [u8; 32] = hasher.finalize().into();
+        let expected_second: [u8; 32] = Sha256::digest(b"second").into();
+        assert_eq!(second, expected_second);
     }
 
     proptest! {

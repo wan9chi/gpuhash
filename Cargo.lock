@@ -384,6 +384,7 @@ name = "gpuhash"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "digest",
  "metal",
  "objc",
  "proptest",
