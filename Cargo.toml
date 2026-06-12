@@ -25,3 +25,7 @@ twox-hash = "2.1.2"
 [[bench]]
 name = "hash_batch"
 harness = false
+
+[[bench]]
+name = "small_files"
+harness = false

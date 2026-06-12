@@ -82,3 +82,46 @@ jobs:
           name: criterion-report
           path: target/criterion
           if-no-files-found: warn
+
+  small-files-bench:
+    name: Small files benchmark on Apple Silicon
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Show runner
+        run: |
+          uname -a
+          sysctl -n machdep.cpu.brand_string || true
+          system_profiler SPDisplaysDataType || true
+          rustc --version
+          cargo --version
+          node --version
+          npm --version
+          corepack --version
+
+      - name: Install Vite fixture
+        run: bash scripts/setup_small_files_fixture.sh "$RUNNER_TEMP/vite-small-files"
+
+      - name: Small files benchmark
+        run: |
+          cargo bench --locked --bench small_files -- --root "$RUNNER_TEMP/vite-small-files" | tee small-files-bench.txt
+          {
+            echo "## Small files benchmark"
+            echo
+            echo "Fixture: vitejs/vite d64a1a5557b3caea9469e70b647ff2c9d9def809 with node_modules installed"
+            echo
+            echo '```text'
+            cat small-files-bench.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload small files benchmark output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: small-files-benchmark
+          path: small-files-bench.txt
+          if-no-files-found: warn

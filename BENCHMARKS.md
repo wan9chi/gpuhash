@@ -71,3 +71,29 @@ It also accepts optional `count len` arguments:
 ```sh
 cargo run --release --example quick_bench -- 131072 4096
 ```
+
+## Small Files Benchmark
+
+The small-files benchmark measures a frontend project tree rather than a
+synthetic fixed-size batch. The CI job clones
+[`vitejs/vite`](https://github.com/vitejs/vite) at
+`d64a1a5557b3caea9469e70b647ff2c9d9def809`, installs `node_modules` with the
+repo-pinned `pnpm`, then hashes every regular file under the checkout. It skips
+`.git` and symlinks so pnpm package links are not double-counted; real files
+inside `node_modules/.pnpm` are included.
+
+Fixture setup:
+
+```sh
+bash scripts/setup_small_files_fixture.sh target/small-files/vite
+```
+
+Benchmark command:
+
+```sh
+cargo bench --locked --bench small_files -- --root target/small-files/vite
+```
+
+The benchmark reads all files once into per-file buffers, verifies GPU output
+against CPU output, and reports both hash-only phases and end-to-end totals
+using the common read time.
