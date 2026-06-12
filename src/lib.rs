@@ -64,6 +64,20 @@ pub struct PreparedBatch {
     total_bytes: usize,
 }
 
+/// Reusable shared-memory staging area for preparing batches without
+/// per-batch Metal buffer allocation.
+///
+/// This is useful when callers already know the message lengths and can fill
+/// each message directly into the provided destination slice, for example by
+/// reading files straight into Apple Silicon shared memory. Calling
+/// [`prepare_with_lengths`](Self::prepare_with_lengths) may overwrite batches
+/// previously returned by the same builder; hash or discard an older batch
+/// before preparing the next one.
+pub struct PreparedBatchBuilder {
+    #[cfg(target_os = "macos")]
+    inner: metal_backend::PreparedBatchBuilder,
+}
+
 impl PreparedBatch {
     /// Number of messages in the batch.
     #[must_use]
@@ -81,6 +95,69 @@ impl PreparedBatch {
     #[must_use]
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
+    }
+}
+
+impl PreparedBatchBuilder {
+    /// Prepares a batch by filling caller-provided message slots directly.
+    ///
+    /// `lengths` gives the exact length of every message. The closure is called
+    /// once per message with a destination slice of that length. It must fill
+    /// the entire slice.
+    pub fn prepare_with_lengths(
+        &mut self,
+        lengths: &[usize],
+        fill: impl FnMut(usize, &mut [u8]) -> Result<()>,
+    ) -> Result<PreparedBatch> {
+        #[cfg(target_os = "macos")]
+        {
+            let inner = self.inner.prepare_with_lengths(lengths, fill)?;
+            Ok(PreparedBatch {
+                count: inner.count(),
+                total_bytes: inner.total_bytes(),
+                inner,
+            })
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = lengths;
+            let _ = fill;
+            Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Prepares a batch like [`prepare_with_lengths`](Self::prepare_with_lengths),
+    /// but may call `fill` concurrently for different messages.
+    ///
+    /// Each call receives a distinct destination slice in the shared Metal
+    /// input buffer. This is useful for many-file workloads where independent
+    /// file reads can fill the prepared buffer in parallel. The closure must be
+    /// thread-safe and must fill the entire slice it receives.
+    pub fn prepare_with_lengths_parallel<F>(
+        &mut self,
+        lengths: &[usize],
+        fill: F,
+    ) -> Result<PreparedBatch>
+    where
+        F: Fn(usize, &mut [u8]) -> Result<()> + Sync,
+    {
+        #[cfg(target_os = "macos")]
+        {
+            let inner = self.inner.prepare_with_lengths_parallel(lengths, fill)?;
+            Ok(PreparedBatch {
+                count: inner.count(),
+                total_bytes: inner.total_bytes(),
+                inner,
+            })
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = lengths;
+            let _ = fill;
+            Err(GpuHashError::MetalUnavailable)
+        }
     }
 }
 
@@ -128,6 +205,23 @@ impl GpuHash {
         {
             let _ = messages;
             Err(GpuHashError::MetalUnavailable)
+        }
+    }
+
+    /// Creates a reusable builder for preparing batches directly into shared
+    /// Metal buffers.
+    #[must_use]
+    pub fn prepared_batch_builder(&self) -> PreparedBatchBuilder {
+        #[cfg(target_os = "macos")]
+        {
+            PreparedBatchBuilder {
+                inner: self.inner.prepared_batch_builder(),
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            PreparedBatchBuilder {}
         }
     }
 
@@ -1311,6 +1405,68 @@ mod tests {
         let sha_first = gpu.sha256_prepared(&batch)?;
         let sha_second = gpu.sha256_prepared(&batch)?;
         assert_eq!(sha_first, sha_second);
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_batch_builder_can_fill_and_reuse_shared_buffers() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let mut builder = gpu.prepared_batch_builder();
+
+        for messages in [
+            sample_messages(),
+            vec![
+                b"second batch".to_vec(),
+                Vec::new(),
+                b"reuses staging buffers".to_vec(),
+            ],
+        ] {
+            let lengths: Vec<_> = messages.iter().map(Vec::len).collect();
+            let batch = builder.prepare_with_lengths(&lengths, |idx, dst| {
+                dst.copy_from_slice(&messages[idx]);
+                Ok(())
+            })?;
+
+            let expected_xxh3: Vec<_> = messages
+                .iter()
+                .map(|message| XxHash3_64::oneshot(message))
+                .collect();
+            assert_eq!(gpu.xxhash3_64_prepared(&batch)?, expected_xxh3);
+
+            let expected_sha: Vec<[u8; 32]> = messages
+                .iter()
+                .map(|message| Sha256::digest(message).into())
+                .collect();
+            assert_eq!(gpu.sha256_prepared(&batch)?, expected_sha);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn prepared_batch_builder_can_fill_shared_buffers_in_parallel() -> Result<()> {
+        let gpu = GpuHash::new()?;
+        let mut builder = gpu.prepared_batch_builder();
+        let messages = sample_messages();
+        let lengths: Vec<_> = messages.iter().map(Vec::len).collect();
+
+        let batch = builder.prepare_with_lengths_parallel(&lengths, |idx, dst| {
+            dst.copy_from_slice(&messages[idx]);
+            Ok(())
+        })?;
+
+        let expected_xxh3: Vec<_> = messages
+            .iter()
+            .map(|message| XxHash3_64::oneshot(message))
+            .collect();
+        assert_eq!(gpu.xxhash3_64_prepared(&batch)?, expected_xxh3);
+
+        let expected_sha: Vec<[u8; 32]> = messages
+            .iter()
+            .map(|message| Sha256::digest(message).into())
+            .collect();
+        assert_eq!(gpu.sha256_prepared(&batch)?, expected_sha);
+
         Ok(())
     }
 

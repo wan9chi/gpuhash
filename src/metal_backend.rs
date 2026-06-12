@@ -4,7 +4,14 @@ use metal::{
     MTLResourceOptions, MTLSize, NSUInteger,
 };
 use objc::rc::autoreleasepool;
-use std::{mem, ptr};
+use std::{
+    mem, ptr, slice,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+};
 
 const SHADERS: &str = include_str!("shaders.metal");
 const MESSAGE_ALIGN: usize = 8;
@@ -125,6 +132,228 @@ impl PreparedBatch {
     }
 }
 
+pub struct PreparedBatchBuilder {
+    device: Device,
+    input: Option<Buffer>,
+    descs: Option<Buffer>,
+    input_capacity: usize,
+    desc_capacity: usize,
+}
+
+impl PreparedBatchBuilder {
+    fn new(device: &Device) -> Self {
+        Self {
+            device: device.to_owned(),
+            input: None,
+            descs: None,
+            input_capacity: 0,
+            desc_capacity: 0,
+        }
+    }
+
+    pub fn prepare_with_lengths(
+        &mut self,
+        lengths: &[usize],
+        mut fill: impl FnMut(usize, &mut [u8]) -> Result<()>,
+    ) -> Result<PreparedBatch> {
+        let (layout, offsets) = self.prepare_layout(lengths)?;
+
+        let input = self.input.as_ref().expect("input buffer allocated");
+
+        unsafe {
+            let input_ptr = input.contents().cast::<u8>();
+
+            for (idx, len) in lengths.iter().copied().enumerate() {
+                let offset = offsets[idx];
+                let dst = slice::from_raw_parts_mut(input_ptr.add(offset), len);
+                fill(idx, dst)?;
+            }
+        }
+
+        Ok(PreparedBatch {
+            input: input.to_owned(),
+            descs: self
+                .descs
+                .as_ref()
+                .expect("descriptor buffer allocated")
+                .to_owned(),
+            count: layout.count,
+            total_bytes: layout.total_bytes,
+            uniform: layout.uniform,
+        })
+    }
+
+    pub fn prepare_with_lengths_parallel<F>(
+        &mut self,
+        lengths: &[usize],
+        fill: F,
+    ) -> Result<PreparedBatch>
+    where
+        F: Fn(usize, &mut [u8]) -> Result<()> + Sync,
+    {
+        let (layout, offsets) = self.prepare_layout(lengths)?;
+
+        let input = self.input.as_ref().expect("input buffer allocated");
+        let input_ptr = input.contents() as usize;
+        let next = AtomicUsize::new(0);
+        let first_error = Mutex::new(None);
+        let worker_count = thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .min(lengths.len().max(1));
+
+        thread::scope(|scope| {
+            for _ in 0..worker_count {
+                let next = &next;
+                let first_error = &first_error;
+                let offsets = &offsets;
+                let fill = &fill;
+
+                scope.spawn(move || {
+                    loop {
+                        if first_error.lock().expect("error lock poisoned").is_some() {
+                            return;
+                        }
+
+                        let idx = next.fetch_add(1, Ordering::Relaxed);
+                        if idx >= lengths.len() {
+                            return;
+                        }
+
+                        let offset = offsets[idx];
+                        let len = lengths[idx];
+                        // Offsets are generated from the packed batch layout, so
+                        // each worker receives a distinct message slice.
+                        let dst = unsafe {
+                            slice::from_raw_parts_mut((input_ptr + offset) as *mut u8, len)
+                        };
+
+                        if let Err(err) = fill(idx, dst) {
+                            *first_error.lock().expect("error lock poisoned") = Some(err);
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        if let Some(err) = first_error.into_inner().expect("error lock poisoned") {
+            return Err(err);
+        }
+
+        Ok(PreparedBatch {
+            input: input.to_owned(),
+            descs: self
+                .descs
+                .as_ref()
+                .expect("descriptor buffer allocated")
+                .to_owned(),
+            count: layout.count,
+            total_bytes: layout.total_bytes,
+            uniform: layout.uniform,
+        })
+    }
+
+    fn prepare_layout(&mut self, lengths: &[usize]) -> Result<(BatchLayout, Vec<usize>)> {
+        let layout = BatchLayout::from_lengths(lengths.iter().copied())?;
+        self.ensure_capacity(layout.padded_bytes.max(1), layout.desc_bytes.max(1));
+
+        let descs = self.descs.as_ref().expect("descriptor buffer allocated");
+        let mut offsets = Vec::with_capacity(lengths.len());
+
+        unsafe {
+            let mut offset = 0usize;
+            let desc_ptr = descs.contents().cast::<MessageDesc>();
+
+            for (idx, len) in lengths.iter().copied().enumerate() {
+                offset = align_up(offset, MESSAGE_ALIGN);
+                offsets.push(offset);
+                *desc_ptr.add(idx) = MessageDesc {
+                    offset: offset as u64,
+                    len: len as u64,
+                };
+                offset += len;
+            }
+        }
+
+        Ok((layout, offsets))
+    }
+
+    fn ensure_capacity(&mut self, input_bytes: usize, desc_bytes: usize) {
+        if self.input_capacity < input_bytes {
+            self.input = Some(
+                self.device
+                    .new_buffer(input_bytes as u64, MTLResourceOptions::StorageModeShared),
+            );
+            self.input_capacity = input_bytes;
+        }
+
+        if self.desc_capacity < desc_bytes {
+            self.descs = Some(
+                self.device
+                    .new_buffer(desc_bytes as u64, MTLResourceOptions::StorageModeShared),
+            );
+            self.desc_capacity = desc_bytes;
+        }
+    }
+}
+
+struct BatchLayout {
+    count: usize,
+    total_bytes: usize,
+    padded_bytes: usize,
+    desc_bytes: usize,
+    uniform: Option<UniformLayout>,
+}
+
+impl BatchLayout {
+    fn from_messages<M: AsRef<[u8]>>(messages: &[M]) -> Result<Self> {
+        Self::from_lengths(messages.iter().map(|message| message.as_ref().len()))
+    }
+
+    fn from_lengths(lengths: impl IntoIterator<Item = usize>) -> Result<Self> {
+        let mut count = 0usize;
+        let mut total_bytes = 0usize;
+        let mut padded_bytes = 0usize;
+        let mut uniform_len = None;
+
+        for len in lengths {
+            if count == 0 {
+                uniform_len = Some(len);
+            } else if uniform_len.is_some_and(|first_len| first_len != len) {
+                uniform_len = None;
+            }
+
+            count = count.checked_add(1).ok_or(GpuHashError::InputTooLarge)?;
+            total_bytes = total_bytes
+                .checked_add(len)
+                .ok_or(GpuHashError::InputTooLarge)?;
+            padded_bytes = align_up(padded_bytes, MESSAGE_ALIGN)
+                .checked_add(len)
+                .ok_or(GpuHashError::InputTooLarge)?;
+        }
+
+        if count > u32::MAX as usize {
+            return Err(GpuHashError::InputTooLarge);
+        }
+
+        let desc_bytes = count
+            .checked_mul(mem::size_of::<MessageDesc>())
+            .ok_or(GpuHashError::InputTooLarge)?;
+
+        Ok(Self {
+            count,
+            total_bytes,
+            padded_bytes,
+            desc_bytes,
+            uniform: uniform_len.map(|len| UniformLayout {
+                len,
+                stride: align_up(len, MESSAGE_ALIGN),
+            }),
+        })
+    }
+}
+
 pub struct GpuHash {
     device: Device,
     queue: CommandQueue,
@@ -231,38 +460,19 @@ impl GpuHash {
         })
     }
 
+    pub fn prepared_batch_builder(&self) -> PreparedBatchBuilder {
+        PreparedBatchBuilder::new(&self.device)
+    }
+
     pub fn prepare_batch<M: AsRef<[u8]>>(&self, messages: &[M]) -> Result<PreparedBatch> {
-        let count = messages.len();
-        if count > u32::MAX as usize {
-            return Err(GpuHashError::InputTooLarge);
-        }
-
-        let mut total_bytes = 0usize;
-        let mut padded_bytes = 0usize;
-        let mut uniform_len = messages.first().map(|message| message.as_ref().len());
-        for message in messages {
-            let len = message.as_ref().len();
-            if uniform_len.is_some_and(|first_len| first_len != len) {
-                uniform_len = None;
-            }
-            total_bytes = total_bytes
-                .checked_add(len)
-                .ok_or(GpuHashError::InputTooLarge)?;
-            padded_bytes = align_up(padded_bytes, MESSAGE_ALIGN)
-                .checked_add(len)
-                .ok_or(GpuHashError::InputTooLarge)?;
-        }
-
-        let desc_bytes = count
-            .checked_mul(mem::size_of::<MessageDesc>())
-            .ok_or(GpuHashError::InputTooLarge)?;
+        let layout = BatchLayout::from_messages(messages)?;
 
         let input = self.device.new_buffer(
-            padded_bytes.max(1) as u64,
+            layout.padded_bytes.max(1) as u64,
             MTLResourceOptions::StorageModeShared,
         );
         let descs = self.device.new_buffer(
-            desc_bytes.max(1) as u64,
+            layout.desc_bytes.max(1) as u64,
             MTLResourceOptions::StorageModeShared,
         );
 
@@ -289,12 +499,9 @@ impl GpuHash {
         Ok(PreparedBatch {
             input,
             descs,
-            count,
-            total_bytes,
-            uniform: uniform_len.map(|len| UniformLayout {
-                len,
-                stride: align_up(len, MESSAGE_ALIGN),
-            }),
+            count: layout.count,
+            total_bytes: layout.total_bytes,
+            uniform: layout.uniform,
         })
     }
 

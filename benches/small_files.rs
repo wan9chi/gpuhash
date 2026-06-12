@@ -1,19 +1,26 @@
-use gpuhash::GpuHash;
+use gpuhash::{GpuHash, PreparedBatchBuilder};
 use sha2::{Digest as _, Sha256};
 use std::{
-    env, fs, io,
+    env, fs,
+    fs::File,
+    io,
+    io::Read as _,
     path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 use twox_hash::XxHash3_64;
+
+const DEFAULT_HYBRID_GPU_MAX_FILE_BYTES: u64 = 1536 * 1024;
 
 #[derive(Debug)]
 struct Args {
     root: PathBuf,
     repetitions: usize,
+    gpu_max_file_bytes: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FileEntry {
     path: PathBuf,
     len: u64,
@@ -38,6 +45,39 @@ struct CpuRun<T> {
 struct GpuHashRun<T> {
     output: Vec<T>,
     hash: Duration,
+}
+
+#[derive(Debug)]
+struct HybridPartition {
+    gpu_files: Vec<FileEntry>,
+    gpu_indices: Vec<usize>,
+    gpu_bytes: u64,
+    cpu_files: Vec<FileEntry>,
+    cpu_indices: Vec<usize>,
+    cpu_bytes: u64,
+}
+
+#[derive(Debug)]
+struct Timed<T> {
+    output: T,
+    elapsed: Duration,
+}
+
+struct HybridInput {
+    small_batch: gpuhash::PreparedBatch,
+    large_messages: Vec<Vec<u8>>,
+    small_prepare: Duration,
+    large_read: Duration,
+    wall: Duration,
+}
+
+#[derive(Debug)]
+struct HybridHashRun<T> {
+    small_output: Vec<T>,
+    large_output: Vec<T>,
+    small_hash: Duration,
+    large_hash: Duration,
+    wall: Duration,
 }
 
 fn main() -> gpuhash::Result<()> {
@@ -70,13 +110,97 @@ fn main() -> gpuhash::Result<()> {
         )));
     }
 
+    let hybrid = partition_for_hybrid(&file_set.files, args.gpu_max_file_bytes);
+    println!(
+        "hybrid threshold: files <= {} bytes use GPU direct-read; larger files use CPU",
+        args.gpu_max_file_bytes
+    );
+    println!(
+        "hybrid gpu files: {}, bytes: {} ({:.2} MiB); cpu files: {}, bytes: {} ({:.2} MiB)",
+        hybrid.gpu_files.len(),
+        hybrid.gpu_bytes,
+        hybrid.gpu_bytes as f64 / (1024.0 * 1024.0),
+        hybrid.cpu_files.len(),
+        hybrid.cpu_bytes,
+        hybrid.cpu_bytes as f64 / (1024.0 * 1024.0),
+    );
+
     let gpu_start = Instant::now();
     let gpu = GpuHash::new()?;
     println!("metal init: {:.3} ms", ms(gpu_start.elapsed()));
+    let mut direct_builder = gpu.prepared_batch_builder();
+    let mut hybrid_builder = gpu.prepared_batch_builder();
 
     for rep in 0..args.repetitions {
         println!();
         println!("repetition: {}/{}", rep + 1, args.repetitions);
+
+        let hybrid_input = prepare_hybrid_input(&mut hybrid_builder, &hybrid)?;
+        print_phase(
+            "hybrid_small_direct_read",
+            hybrid_input.small_prepare,
+            hybrid.gpu_bytes,
+        );
+        print_phase(
+            "hybrid_large_read_files",
+            hybrid_input.large_read,
+            hybrid.cpu_bytes,
+        );
+        print_phase("hybrid_input_wall", hybrid_input.wall, file_set.total_bytes);
+
+        let hybrid_xxh3 = hybrid_xxh3(
+            &gpu,
+            &hybrid_input.small_batch,
+            &hybrid_input.large_messages,
+        )?;
+        print_phase(
+            "hybrid_gpu_xxh3_small_hash",
+            hybrid_xxh3.small_hash,
+            hybrid.gpu_bytes,
+        );
+        print_phase(
+            "hybrid_cpu_xxh3_large_hash",
+            hybrid_xxh3.large_hash,
+            hybrid.cpu_bytes,
+        );
+        print_phase(
+            "hybrid_xxh3_hash_wall",
+            hybrid_xxh3.wall,
+            file_set.total_bytes,
+        );
+
+        let hybrid_sha256 = hybrid_sha256(
+            &gpu,
+            &hybrid_input.small_batch,
+            &hybrid_input.large_messages,
+        )?;
+        print_phase(
+            "hybrid_gpu_sha256_small_hash",
+            hybrid_sha256.small_hash,
+            hybrid.gpu_bytes,
+        );
+        print_phase(
+            "hybrid_cpu_sha256_large_hash",
+            hybrid_sha256.large_hash,
+            hybrid.cpu_bytes,
+        );
+        print_phase(
+            "hybrid_sha256_hash_wall",
+            hybrid_sha256.wall,
+            file_set.total_bytes,
+        );
+
+        let direct_prepare_start = Instant::now();
+        let direct_batch = prepare_files_direct(&mut direct_builder, &file_set.files)?;
+        let direct_prepare = direct_prepare_start.elapsed();
+        print_phase(
+            "gpu_prepare_batch_direct_all",
+            direct_prepare,
+            file_set.total_bytes,
+        );
+
+        let gpu_xxh3_direct = gpu_xxh3(&gpu, &direct_batch)?;
+        let gpu_sha256_direct = gpu_sha256(&gpu, &direct_batch)?;
 
         let read_start = Instant::now();
         let messages = read_all(&file_set.files)?;
@@ -86,23 +210,36 @@ fn main() -> gpuhash::Result<()> {
         let prepare_start = Instant::now();
         let batch = gpu.prepare_batch(&messages)?;
         let prepare = prepare_start.elapsed();
-        print_phase("gpu_prepare_batch", prepare, file_set.total_bytes);
+        print_phase("gpu_prepare_batch_copy", prepare, file_set.total_bytes);
 
         let cpu_xxh3 = cpu_xxh3(&messages);
-        let gpu_xxh3 = gpu_xxh3(&gpu, &batch)?;
-        if cpu_xxh3.output != gpu_xxh3.output {
+        let gpu_xxh3_copy = gpu_xxh3(&gpu, &batch)?;
+        if cpu_xxh3.output != gpu_xxh3_copy.output || cpu_xxh3.output != gpu_xxh3_direct.output {
             return Err(gpuhash::GpuHashError::Metal(
                 "XXH3 CPU/GPU output mismatch".to_owned(),
             ));
         }
+        verify_partitioned(
+            &cpu_xxh3.output,
+            &hybrid.gpu_indices,
+            &hybrid_xxh3.small_output,
+            &hybrid.cpu_indices,
+            &hybrid_xxh3.large_output,
+            "XXH3 hybrid output mismatch",
+        )?;
         print_phase(
             "cpu_xxh3_hash_buffers",
             cpu_xxh3.elapsed,
             file_set.total_bytes,
         );
         print_phase(
-            "gpu_xxh3_hash_prepared",
-            gpu_xxh3.hash,
+            "gpu_xxh3_hash_copy_prepared",
+            gpu_xxh3_copy.hash,
+            file_set.total_bytes,
+        );
+        print_phase(
+            "gpu_xxh3_hash_direct_all_prepared",
+            gpu_xxh3_direct.hash,
             file_set.total_bytes,
         );
         print_total(
@@ -111,31 +248,66 @@ fn main() -> gpuhash::Result<()> {
             file_set.total_bytes,
         );
         print_total(
-            "gpu_xxh3_total_read_prepare_hash",
-            read + prepare + gpu_xxh3.hash,
+            "gpu_xxh3_total_copy_prepare_hash",
+            read + prepare + gpu_xxh3_copy.hash,
+            file_set.total_bytes,
+        );
+        print_total(
+            "gpu_xxh3_total_direct_all_read_hash",
+            direct_prepare + gpu_xxh3_direct.hash,
+            file_set.total_bytes,
+        );
+        print_total(
+            "hybrid_xxh3_total_read_hash",
+            hybrid_input.wall + hybrid_xxh3.wall,
             file_set.total_bytes,
         );
         print_speedup(
-            "xxh3_total_speedup",
+            "xxh3_copy_total_speedup",
             read + cpu_xxh3.elapsed,
-            read + prepare + gpu_xxh3.hash,
+            read + prepare + gpu_xxh3_copy.hash,
+        );
+        print_speedup(
+            "xxh3_direct_all_total_speedup",
+            read + cpu_xxh3.elapsed,
+            direct_prepare + gpu_xxh3_direct.hash,
+        );
+        print_speedup(
+            "xxh3_hybrid_total_speedup",
+            read + cpu_xxh3.elapsed,
+            hybrid_input.wall + hybrid_xxh3.wall,
         );
 
         let cpu_sha256 = cpu_sha256(&messages);
-        let gpu_sha256 = gpu_sha256(&gpu, &batch)?;
-        if cpu_sha256.output != gpu_sha256.output {
+        let gpu_sha256_copy = gpu_sha256(&gpu, &batch)?;
+        if cpu_sha256.output != gpu_sha256_copy.output
+            || cpu_sha256.output != gpu_sha256_direct.output
+        {
             return Err(gpuhash::GpuHashError::Metal(
                 "SHA-256 CPU/GPU output mismatch".to_owned(),
             ));
         }
+        verify_partitioned(
+            &cpu_sha256.output,
+            &hybrid.gpu_indices,
+            &hybrid_sha256.small_output,
+            &hybrid.cpu_indices,
+            &hybrid_sha256.large_output,
+            "SHA-256 hybrid output mismatch",
+        )?;
         print_phase(
             "cpu_sha256_hash_buffers",
             cpu_sha256.elapsed,
             file_set.total_bytes,
         );
         print_phase(
-            "gpu_sha256_hash_prepared",
-            gpu_sha256.hash,
+            "gpu_sha256_hash_copy_prepared",
+            gpu_sha256_copy.hash,
+            file_set.total_bytes,
+        );
+        print_phase(
+            "gpu_sha256_hash_direct_all_prepared",
+            gpu_sha256_direct.hash,
             file_set.total_bytes,
         );
         print_total(
@@ -144,14 +316,34 @@ fn main() -> gpuhash::Result<()> {
             file_set.total_bytes,
         );
         print_total(
-            "gpu_sha256_total_read_prepare_hash",
-            read + prepare + gpu_sha256.hash,
+            "gpu_sha256_total_copy_prepare_hash",
+            read + prepare + gpu_sha256_copy.hash,
+            file_set.total_bytes,
+        );
+        print_total(
+            "gpu_sha256_total_direct_all_read_hash",
+            direct_prepare + gpu_sha256_direct.hash,
+            file_set.total_bytes,
+        );
+        print_total(
+            "hybrid_sha256_total_read_hash",
+            hybrid_input.wall + hybrid_sha256.wall,
             file_set.total_bytes,
         );
         print_speedup(
-            "sha256_total_speedup",
+            "sha256_copy_total_speedup",
             read + cpu_sha256.elapsed,
-            read + prepare + gpu_sha256.hash,
+            read + prepare + gpu_sha256_copy.hash,
+        );
+        print_speedup(
+            "sha256_direct_all_total_speedup",
+            read + cpu_sha256.elapsed,
+            direct_prepare + gpu_sha256_direct.hash,
+        );
+        print_speedup(
+            "sha256_hybrid_total_speedup",
+            read + cpu_sha256.elapsed,
+            hybrid_input.wall + hybrid_sha256.wall,
         );
     }
 
@@ -164,6 +356,10 @@ fn parse_args() -> gpuhash::Result<Args> {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);
+    let mut gpu_max_file_bytes = env::var("GPUHASH_SMALL_FILES_GPU_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_HYBRID_GPU_MAX_FILE_BYTES);
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -183,9 +379,19 @@ fn parse_args() -> gpuhash::Result<Args> {
                     gpuhash::GpuHashError::Metal(format!("invalid --repetitions: {err}"))
                 })?;
             }
+            "--gpu-max-file-bytes" => {
+                let value = args.next().ok_or_else(|| {
+                    gpuhash::GpuHashError::Metal(
+                        "--gpu-max-file-bytes requires a number".to_owned(),
+                    )
+                })?;
+                gpu_max_file_bytes = value.parse().map_err(|err| {
+                    gpuhash::GpuHashError::Metal(format!("invalid --gpu-max-file-bytes: {err}"))
+                })?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo bench --bench small_files -- --root <dir> [--repetitions N]"
+                    "Usage: cargo bench --bench small_files -- --root <dir> [--repetitions N] [--gpu-max-file-bytes N]"
                 );
                 std::process::exit(0);
             }
@@ -207,7 +413,11 @@ fn parse_args() -> gpuhash::Result<Args> {
         repetitions = 1;
     }
 
-    Ok(Args { root, repetitions })
+    Ok(Args {
+        root,
+        repetitions,
+        gpu_max_file_bytes,
+    })
 }
 
 fn scan_files(root: &Path) -> gpuhash::Result<FileSet> {
@@ -256,6 +466,150 @@ fn scan_files(root: &Path) -> gpuhash::Result<FileSet> {
     })
 }
 
+fn partition_for_hybrid(files: &[FileEntry], gpu_max_file_bytes: u64) -> HybridPartition {
+    let mut gpu_files = Vec::new();
+    let mut gpu_indices = Vec::new();
+    let mut gpu_bytes = 0u64;
+    let mut cpu_files = Vec::new();
+    let mut cpu_indices = Vec::new();
+    let mut cpu_bytes = 0u64;
+
+    for (idx, file) in files.iter().enumerate() {
+        if file.len <= gpu_max_file_bytes {
+            gpu_bytes += file.len;
+            gpu_files.push(file.clone());
+            gpu_indices.push(idx);
+        } else {
+            cpu_bytes += file.len;
+            cpu_files.push(file.clone());
+            cpu_indices.push(idx);
+        }
+    }
+
+    HybridPartition {
+        gpu_files,
+        gpu_indices,
+        gpu_bytes,
+        cpu_files,
+        cpu_indices,
+        cpu_bytes,
+    }
+}
+
+fn prepare_hybrid_input(
+    builder: &mut PreparedBatchBuilder,
+    partition: &HybridPartition,
+) -> gpuhash::Result<HybridInput> {
+    let wall_start = Instant::now();
+
+    let (small_batch, large_read, small_prepare) = thread::scope(|scope| {
+        let large_handle = scope.spawn(|| read_all_timed(&partition.cpu_files));
+
+        let small_start = Instant::now();
+        let small_batch = prepare_files_direct(builder, &partition.gpu_files)?;
+        let small_prepare = small_start.elapsed();
+
+        let large_read = large_handle
+            .join()
+            .map_err(|_| gpuhash::GpuHashError::Metal("large file reader panicked".to_owned()))??;
+
+        Ok::<_, gpuhash::GpuHashError>((small_batch, large_read, small_prepare))
+    })?;
+
+    Ok(HybridInput {
+        small_batch,
+        large_messages: large_read.output,
+        small_prepare,
+        large_read: large_read.elapsed,
+        wall: wall_start.elapsed(),
+    })
+}
+
+fn hybrid_xxh3(
+    gpu: &GpuHash,
+    small_batch: &gpuhash::PreparedBatch,
+    large_messages: &[Vec<u8>],
+) -> gpuhash::Result<HybridHashRun<u64>> {
+    let wall_start = Instant::now();
+
+    let (small, large) = thread::scope(|scope| {
+        let large_handle = scope.spawn(|| cpu_xxh3(large_messages));
+        let small = gpu_xxh3(gpu, small_batch)?;
+        let large = large_handle
+            .join()
+            .map_err(|_| gpuhash::GpuHashError::Metal("large XXH3 worker panicked".to_owned()))?;
+
+        Ok::<_, gpuhash::GpuHashError>((small, large))
+    })?;
+
+    Ok(HybridHashRun {
+        small_output: small.output,
+        large_output: large.output,
+        small_hash: small.hash,
+        large_hash: large.elapsed,
+        wall: wall_start.elapsed(),
+    })
+}
+
+fn hybrid_sha256(
+    gpu: &GpuHash,
+    small_batch: &gpuhash::PreparedBatch,
+    large_messages: &[Vec<u8>],
+) -> gpuhash::Result<HybridHashRun<[u8; 32]>> {
+    let wall_start = Instant::now();
+
+    let (small, large) = thread::scope(|scope| {
+        let large_handle = scope.spawn(|| cpu_sha256(large_messages));
+        let small = gpu_sha256(gpu, small_batch)?;
+        let large = large_handle.join().map_err(|_| {
+            gpuhash::GpuHashError::Metal("large SHA-256 worker panicked".to_owned())
+        })?;
+
+        Ok::<_, gpuhash::GpuHashError>((small, large))
+    })?;
+
+    Ok(HybridHashRun {
+        small_output: small.output,
+        large_output: large.output,
+        small_hash: small.hash,
+        large_hash: large.elapsed,
+        wall: wall_start.elapsed(),
+    })
+}
+
+fn verify_partitioned<T: Eq>(
+    expected: &[T],
+    gpu_indices: &[usize],
+    gpu_output: &[T],
+    cpu_indices: &[usize],
+    cpu_output: &[T],
+    message: &str,
+) -> gpuhash::Result<()> {
+    if gpu_indices.len() != gpu_output.len() || cpu_indices.len() != cpu_output.len() {
+        return Err(gpuhash::GpuHashError::Metal(format!(
+            "{message}: partition/output length mismatch"
+        )));
+    }
+
+    for (&idx, got) in gpu_indices.iter().zip(gpu_output) {
+        if expected.get(idx) != Some(got) {
+            return Err(gpuhash::GpuHashError::Metal(format!(
+                "{message}: GPU partition mismatch at file index {idx}"
+            )));
+        }
+    }
+
+    for (&idx, got) in cpu_indices.iter().zip(cpu_output) {
+        if expected.get(idx) != Some(got) {
+            return Err(gpuhash::GpuHashError::Metal(format!(
+                "{message}: CPU partition mismatch at file index {idx}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn cpu_xxh3(messages: &[Vec<u8>]) -> CpuRun<u64> {
     let started = Instant::now();
     let mut output = Vec::with_capacity(messages.len());
@@ -299,8 +653,41 @@ fn gpu_sha256(
     Ok(GpuHashRun { output, hash })
 }
 
+fn prepare_files_direct(
+    builder: &mut PreparedBatchBuilder,
+    files: &[FileEntry],
+) -> gpuhash::Result<gpuhash::PreparedBatch> {
+    let lengths: Vec<_> = files
+        .iter()
+        .map(|file| {
+            usize::try_from(file.len).map_err(|_| {
+                gpuhash::GpuHashError::Metal(format!(
+                    "file is too large for this platform: {}",
+                    file.path.display()
+                ))
+            })
+        })
+        .collect::<gpuhash::Result<_>>()?;
+
+    builder.prepare_with_lengths_parallel(&lengths, |idx, dst| {
+        let mut file =
+            File::open(&files[idx].path).map_err(|err| io_error("open", &files[idx].path, err))?;
+        file.read_exact(dst)
+            .map_err(|err| io_error("read_exact", &files[idx].path, err))
+    })
+}
+
 fn read_all(files: &[FileEntry]) -> gpuhash::Result<Vec<Vec<u8>>> {
     files.iter().map(read_file).collect()
+}
+
+fn read_all_timed(files: &[FileEntry]) -> gpuhash::Result<Timed<Vec<Vec<u8>>>> {
+    let started = Instant::now();
+    let output = read_all(files)?;
+    Ok(Timed {
+        output,
+        elapsed: started.elapsed(),
+    })
 }
 
 fn read_file(file: &FileEntry) -> gpuhash::Result<Vec<u8>> {
