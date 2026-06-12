@@ -23,6 +23,9 @@ Metal buffers, so kernels write directly into the Rust output allocation.
 Small kernel configuration structs are bound inline with Metal `setBytes`,
 avoiding per-dispatch config-buffer allocation. XXH3 secrets up to 4 KiB use
 the same inline path; larger custom secrets fall back to shared Metal buffers.
+For file-heavy callers, `PreparedBatchBuilder` can reuse the shared input and
+descriptor buffers and fill message slots directly, including a parallel fill
+mode suitable for reading many independent files straight into unified memory.
 
 ## Performance
 
@@ -43,8 +46,23 @@ The Apple Silicon benchmark job runs in
 [GitHub Actions](https://github.com/wan9chi/gpuhash/actions/workflows/ci.yml?query=branch%3Amain);
 each run uploads the Criterion report as a `criterion-report` artifact.
 Example successful benchmark job:
-[run 27380736769 / job 80916683715](https://github.com/wan9chi/gpuhash/actions/runs/27380736769/job/80916683715),
-with `criterion-report` artifact id `7578233922`.
+[run 27389494910 / job 80943862081](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/job/80943862081),
+with [`criterion-report` artifact id `7581404441`](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/artifacts/7581404441).
+
+For a real frontend tree, the CI small-files benchmark clones Vite, installs
+`node_modules`, and hashes every regular file, including real package files
+under `node_modules/.pnpm`. On the Apple M1 virtual GitHub runner, the
+1.5 MiB hybrid threshold sends 39,598 files / 267.82 MiB through direct GPU
+buffer fill and 36 larger files / 381.45 MiB through CPU hashing:
+
+| Workload | CPU read + hash | Hybrid direct GPU/CPU | Speedup |
+| --- | ---: | ---: | ---: |
+| Vite tree XXH3-64 | 5475.702 ms | 3027.313 ms | 1.809x |
+| Vite tree SHA-256 | 5735.252 ms | 3174.173 ms | 1.807x |
+
+Small-files benchmark job:
+[run 27389494910 / job 80943862098](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/job/80943862098),
+with [`small-files-benchmark` artifact id `7581383990`](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/artifacts/7581383990).
 
 ## Run
 
@@ -52,6 +70,7 @@ with `criterion-report` artifact id `7578233922`.
 cargo test
 cargo run --release --example quick_bench
 cargo bench --bench hash_batch
+cargo bench --bench small_files -- --root target/small-files/vite
 ```
 
 GPU acceleration is a batch API. Single tiny messages are still better served by
@@ -59,3 +78,7 @@ the CPU reference crates because Metal command submission has fixed overhead.
 The fastest path is `PreparedBatch` reuse; buffered GPU-backed hasher helpers are
 also available for `std::hash::Hasher`- and `BuildHasher`-style compatibility
 when ergonomics matter more than peak throughput.
+For file trees with large outliers, the small-files benchmark reports both
+all-GPU direct-read and hybrid GPU/CPU totals because SHA-256 and large-message
+hash chains are serial enough that CPU fallback can be the better real-world
+choice.

@@ -16,8 +16,8 @@ The same benchmark runs in the
 [GitHub Actions benchmark job](https://github.com/wan9chi/gpuhash/actions/workflows/ci.yml?query=branch%3Amain).
 Each run uploads the Criterion report as the `criterion-report` artifact.
 Example successful benchmark job:
-[run 27380736769 / job 80916683715](https://github.com/wan9chi/gpuhash/actions/runs/27380736769/job/80916683715),
-with `criterion-report` artifact id `7578233922`.
+[run 27389494910 / job 80943862081](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/job/80943862081),
+with [`criterion-report` artifact id `7581404441`](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/artifacts/7581404441).
 
 Benchmark batch:
 
@@ -94,6 +94,42 @@ Benchmark command:
 cargo bench --locked --bench small_files -- --root target/small-files/vite
 ```
 
-The benchmark reads all files once into per-file buffers, verifies GPU output
-against CPU output, and reports both hash-only phases and end-to-end totals
-using the common read time.
+The benchmark verifies every GPU and hybrid output against CPU output. It
+reports:
+
+- CPU baseline: read every file into per-file buffers, then hash with the
+  reference crates.
+- Copy-prepared GPU path: read into per-file buffers, copy into a prepared
+  shared Metal batch, then hash on GPU.
+- All-files direct GPU path: read every file directly into a reusable shared
+  Metal buffer with `PreparedBatchBuilder::prepare_with_lengths_parallel`.
+- Hybrid path: read files at or below the threshold directly into the reusable
+  Metal buffer and hash them on GPU; read larger files into CPU buffers and hash
+  them on CPU. The default threshold is 1.5 MiB and can be changed with
+  `--gpu-max-file-bytes` or `GPUHASH_SMALL_FILES_GPU_MAX_BYTES`.
+
+Example CI small-files job:
+[run 27389494910 / job 80943862098](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/job/80943862098),
+with [`small-files-benchmark` artifact id `7581383990`](https://github.com/wan9chi/gpuhash/actions/runs/27389494910/artifacts/7581383990).
+
+CI fixture from that run:
+
+- Apple M1 (Virtual), macOS 15.7.7, Rust 1.95.0
+- 39,634 files
+- 680,803,695 bytes (649.26 MiB)
+- Hybrid threshold: 1,572,864 bytes
+- Hybrid GPU partition: 39,598 files, 280,826,187 bytes (267.82 MiB)
+- Hybrid CPU partition: 36 files, 399,977,508 bytes (381.45 MiB)
+
+CI small-files results:
+
+| Path | XXH3-64 total | XXH3 speedup | SHA-256 total | SHA-256 speedup |
+| --- | ---: | ---: | ---: | ---: |
+| CPU read + hash | 5475.702 ms | 1.000x | 5735.252 ms | 1.000x |
+| GPU copy-prepared | 8697.111 ms | 0.630x | 16058.405 ms | 0.357x |
+| GPU direct all files | 2915.929 ms | 1.878x | 10131.072 ms | 0.566x |
+| Hybrid direct GPU/CPU | 3027.313 ms | 1.809x | 3174.173 ms | 1.807x |
+
+The all-GPU direct path is excellent for this CI runner's XXH3 file traversal,
+but SHA-256 remains serial enough on large files that the hybrid path is the
+better combined real-world strategy.
